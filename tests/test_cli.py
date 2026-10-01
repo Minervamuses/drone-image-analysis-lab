@@ -23,14 +23,15 @@ class CLITests(unittest.TestCase):
         Image.new("RGB", (3, 2), color).save(path)
         return path.read_bytes()
 
-    def run_cli(self, args=(), *, cwd=None, model_error=None):
+    def run_cli(self, args=(), *, cwd=None, model="models/selected.pth", model_error=None):
         output = io.StringIO()
         descriptor = SimpleNamespace(device=torch.device("cpu"))
+        model_args = [] if model is None else ["--model", str(model)]
         with (
             contextlib.chdir(cwd or self.root),
             contextlib.redirect_stdout(output),
             contextlib.redirect_stderr(output),
-            patch("sys.argv", ["drone_sr", *args]),
+            patch("sys.argv", ["drone_sr", *model_args, *args]),
             patch("drone_sr.inference.load_model", return_value=descriptor,
                   side_effect=model_error) as loader,
             patch("drone_sr.inference.upscale", side_effect=lambda image, model:
@@ -40,7 +41,28 @@ class CLITests(unittest.TestCase):
                 code = main()
             except SystemExit as error:
                 code = error.code
+        if loader.called:
+            loader.assert_called_once_with(Path(model))
         return code, output.getvalue(), loader.call_count, upscale.call_count
+
+    def test_model_is_required_even_when_default_checkpoint_exists(self):
+        self.picture(self.root / "input" / "sample.png")
+        checkpoint = self.root / "models" / "model.pth"
+        checkpoint.parent.mkdir()
+        checkpoint.touch()
+        code, text, loads, calls = self.run_cli(model=None)
+        self.assertEqual(code, 2, text)
+        self.assertIn("required: --model", text)
+        self.assertEqual((loads, calls), (0, 0))
+        self.assertFalse((self.root / "output").exists())
+
+    def test_relative_and_absolute_checkpoint_paths_are_passed_to_loader(self):
+        self.picture(self.root / "input" / "sample.png")
+        for model in (Path("checkpoints/selected model.safetensors"), self.root / "another.pth"):
+            with self.subTest(model=model):
+                code, text, loads, calls = self.run_cli(model=model)
+                self.assertEqual(code, 0, text)
+                self.assertEqual((loads, calls), (1, 1))
 
     def test_default_and_independently_optional_folder_arguments(self):
         cases = [
@@ -215,12 +237,12 @@ class CLITests(unittest.TestCase):
         self.assertEqual((loads, calls), (1, 0))
         self.assertFalse((self.root / "output").exists())
 
-    def test_help_exposes_only_folder_options(self):
-        code, text, loads, calls = self.run_cli(["--help"])
+    def test_help_exposes_model_and_folder_options_without_requiring_a_model(self):
+        code, text, loads, calls = self.run_cli(["--help"], model=None)
         self.assertEqual(code, 0)
-        for option in ("--input", "--output"):
+        for option in ("--model", "--input", "--output"):
             self.assertIn(option, text)
-        for option in ("--model", "--device", "--tile", "--scale", "--batch", "--overwrite"):
+        for option in ("--device", "--tile", "--scale", "--batch", "--overwrite"):
             self.assertNotIn(option, text)
         self.assertEqual((loads, calls), (0, 0))
 

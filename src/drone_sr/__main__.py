@@ -7,6 +7,7 @@ from pathlib import Path
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Upscale images from an input folder into PNG files.")
+    parser.add_argument("--model", type=Path, required=True, help="Path to the SR checkpoint (required)")
     parser.add_argument("--input", type=Path, default=Path("input"), help="Input folder (default: input/)")
     parser.add_argument("--output", type=Path, default=Path("output"), help="Output folder (default: output/)")
     args = parser.parse_args()
@@ -53,7 +54,7 @@ def main() -> int:
     from .inference import load_model, upscale
 
     try:
-        descriptor = load_model()
+        descriptor = load_model(args.model)
     except Exception as error:
         print(str(error))
         return 1
