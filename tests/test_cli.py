@@ -63,6 +63,7 @@ class CLITests(unittest.TestCase):
                 code, text, loads, calls = self.run_cli(model=model)
                 self.assertEqual(code, 0, text)
                 self.assertEqual((loads, calls), (1, 1))
+                self.assertIn(f"Model: {model}\n", text.split("Finished\n", 1)[1])
 
     def test_default_and_independently_optional_folder_arguments(self):
         cases = [
@@ -138,6 +139,7 @@ class CLITests(unittest.TestCase):
         self.assertEqual((loads, calls), (1, 5))
         self.assertIn("Processed: 5", text)
         self.assertIn("Failed: 1", text)
+        self.assertIn("Model: models/selected.pth\n", text.split("Finished\n", 1)[1])
         positions = [text.index(f"[{index}/6] {name}")
                      for index, name in enumerate(names, 1)]
         self.assertEqual(positions, sorted(positions))

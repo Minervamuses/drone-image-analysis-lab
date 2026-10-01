@@ -159,6 +159,7 @@ def main(argv=None) -> int:
             status = 1
         # The helper's model and LPIPS references are gone before loading the next checkpoint.
         release_device_memory()
+    print(f"checkpoints attempted: {', '.join(checkpoint.name for checkpoint in checkpoints)}")
     return status
 
 

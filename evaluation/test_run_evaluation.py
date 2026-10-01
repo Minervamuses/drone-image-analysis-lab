@@ -71,13 +71,14 @@ class EvaluationSelectionTests(unittest.TestCase):
             patch.object(run_evaluation, "select_sources", wraps=run_evaluation.select_sources) as select,
             patch.object(run_evaluation, "_evaluate_checkpoint", side_effect=evaluate),
             patch.object(run_evaluation, "release_device_memory"),
-            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stdout(io.StringIO()) as output,
         ):
             status = run_evaluation.main([
                 "--all", "--input", str(self.sources), "--runs-root", str(self.runs),
                 "--limit", "2", "--seed", "37",
             ])
         self.assertEqual(status, 0)
+        self.assertEqual(output.getvalue().splitlines()[-1], "checkpoints attempted: a.pth, b.pth")
         select.assert_called_once_with(self.sources, limit=2, seed=37)
         self.assertEqual([row[1] for row in observed], checkpoints)
         self.assertIs(observed[0][0], observed[1][0])
@@ -94,11 +95,13 @@ class EvaluationSelectionTests(unittest.TestCase):
         with (
             patch.object(run_evaluation, "_evaluate_checkpoint", side_effect=[ValueError("unsupported scale"), 0]) as evaluate,
             patch.object(run_evaluation, "release_device_memory"),
-            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stdout(io.StringIO()) as output,
             contextlib.redirect_stderr(io.StringIO()),
         ):
             status = run_evaluation.main(["--all", "--input", str(self.sources), "--runs-root", str(self.runs)])
         self.assertEqual(status, 1)
+        self.assertEqual(output.getvalue().splitlines()[-1],
+                         "checkpoints attempted: a-broken.pth, b-working.pth")
         self.assertEqual(evaluate.call_count, 2)
         failed_dir = evaluate.call_args_list[0].args[-1]
         text = (failed_dir / "report.md").read_text()

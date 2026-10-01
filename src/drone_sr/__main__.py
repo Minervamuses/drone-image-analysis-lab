@@ -64,7 +64,7 @@ def main() -> int:
 
         device_label += f" ({get_device_name(descriptor.device)})"
     print(f"Device: {device_label}")
-    print("Model: loaded")
+    print(f"Model: {args.model}")
     print(f"Images: {len(images)}")
     processed = failed = 0
     for index, (source, destination) in enumerate(zip(images, destinations), 1):
@@ -84,6 +84,7 @@ def main() -> int:
             # Release the previous image before starting the next GPU forward.
             del result
     print("Finished")
+    print(f"Model: {args.model}")
     print(f"Processed: {processed}")
     print(f"Failed: {failed}")
     print(f"Output: {output_directory}/")
