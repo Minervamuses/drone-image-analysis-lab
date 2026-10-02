@@ -7,7 +7,7 @@
 | Phase | 狀態 | 開始 | 完成 | 證據 | 阻塞 |
 |---|---|---|---|---|---|
 | 01 — 本機環境與三模式 | Complete | 2026-10-02 | 2026-10-02 | 下方 Phase 01 51 項本機測試及 pip check | 無；真模型另待 lab |
-| 02 — 可選模式與 deblur lab | Not started | — | — | — | 等待 01 的本機驗收 |
+| 02 — 可選模式與 deblur lab | Complete | 2026-10-02 | 2026-10-02 | 下方 62 項必要／新 runner 檢查及 shell stub | 無；指標接入於 03 |
 | 03 — 四指標、報告與交付 | Not started | — | — | — | 等待 02 的本機驗收 |
 
 狀態只使用 Not started、In progress、Blocked、Complete。只有必要本機驗收有觀察證據才標 Complete；不複製另一份 phase 狀態。
@@ -56,3 +56,21 @@ lab 真實權重／GPU／圖片品質尚未驗證；依最新分工屬使用者�
   - .venv/bin/python -m drone_sr --help、git diff --check → 通過。
 - 以上是 CPU tiny synthetic／mock 與安全寫檔證據；沒有真權重／GPU 推論，沒有檢驗五模型畫質或分塊接縫。一般 CLI／Docker 用法已在 README 前段同步，Docker 未重建。
 - 本批 commit：feat: add ordered SR and deblur inference modes（SHA 由 Git 歷史追溯）。完成提交後自動開始 Phase 02。
+
+### 2026-10-02 — Phase 02 Complete：可選 evaluation 與 deblur-only lab
+
+- 接續 Phase 01 commit 35522e6，main／相同 WSL .venv，沒有切 branch 或 push。
+- 新 evaluator 明確選一條有序模式；N=2 時 deblur／任一 combine 各 2 組、SR-only 1 組。SR 必須選單顆，deblur 可選單顆或第一層排序／resolve 去重掃描；sample 每 run 固定一次。
+- 新 runner 使用共用解碼／tensor inference／PNG，不讀 GT、不降採樣、不匯入 LPIPS。模型逐組釋放、保存逐模型／逐張錯誤與正確非零退出碼；ID 含順序與 resolved checkpoint 路徑／SHA，拒絕同 stem 輸入輸出衝突，run/組目錄均不重用。
+- report.md／per_image.md 同源互鏈、列模型身分、模式、輸入／輸出與失敗；四指標仍明確待量測，非假數據。本階段不宣稱四指標已驗收。
+- lab/run.sh 固定 --deblur，預設 evaluation/data/input/／limit=1；允許單顆 checkpoint/input/limit/seed/runs-root，拒絕其他模式與縮寫。保留 CUDA/pip preflight，加入可取得資源資訊。legacy 僅 --legacy-sr，models/sr/，舊 --model/--all 語義保留。
+- 安裝 evaluation/requirements.txt 的既有 lpips 0.1.4／SciPy 1.18.1／tqdm 4.70.1。單連線下載慢，SciPy 使用同一官方 PyPI 檔案分段取得並核對官方 SHA-256，再從本地完整 wheel 安裝；沒有下載 AlexNet 或 SR/deblur checkpoint。
+- 初次入口檢查：2 項 legacy 測試因 lpips 尚未安裝而 error，另修正 sparse mock 缺少組 ID 的測試資料；新模式/lab 11 項通過。完成依賴後重新跑必要集合，未把先前失敗視作成功。
+- 最終必要檢查（CUDA_VISIBLE_DEVICES 空、OMP_NUM_THREADS=2、MKL_NUM_THREADS=2）：
+  - PYTHONPATH=src:evaluation .venv/bin/python -m unittest test_run_evaluation test_runs test_sources test_report test_runner.SelectSourcesTests test_runner.DeviceMemoryTests test_runner.OrderedBatchTests test_sr_line.ScaleAssertionTests → 62 tests OK，含真實 shell stub 參數檢查。
+  - .venv/bin/python -m pip check → No broken requirements found。
+  - bash -n lab/run.sh、evaluation/run_evaluation.py --help、git diff --check → 通過。
+  - CUDA_VISIBLE_DEVICES= bash lab/run.sh --limit 1 → 預期 exit 1／CUDA unavailable，在推論前停止，無 CPU fallback。
+- fresh-agent 對 selection/count/order、兩報告骨架、檔案安全、失敗隔離、LPIPS 分離及 lab 參數做唯讀程式審查，無新增阻擋發現。
+- 本批 commit：feat: add selectable evaluation and deblur-only lab entry。README 仍只 stage 本次差異；既有使用者 I/O／測試、Docker／Colab／素材／歷史分析未納入。
+- 本地測試均 synthetic／mock，沒有真權重或 GPU inference；完成提交後自動開始 Phase 03 四指標及交付。

@@ -179,5 +179,34 @@ class ReportTests(unittest.TestCase):
         self.assertIn("| 模型 SHA-256 | n/a |", text)
 
 
+
+class ModeSkeletonReportTests(unittest.TestCase):
+    def test_two_views_link_sources_outputs_models_and_failures_without_fake_metrics(self):
+        from report import write_mode_reports
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory)
+            combo = {"id": "deblur-abc", "order": ["deblur"], "error": None,
+                     "elapsed_seconds": 0.1, "models": [
+                         {"role": "deblur", "path": "/models/deblur/model.pth",
+                          "sha256": "checksum", "architecture": "Synthetic", "scale": 1, "device": "cpu"}],
+                     "rows": [
+                         {"input": "/input/good.png", "input_size": (65, 67), "status": "success",
+                          "output": str(run / "deblur-abc/good.png"), "output_size": (65, 67)},
+                         {"input": "/input/bad.png", "status": "failed", "failure_stage": "decode",
+                          "reason": "cannot decode"}]}
+            write_mode_reports(run, {"mode": "deblur", "selected": ["good.png", "bad.png"]}, [combo])
+            main = (run / "report.md").read_text()
+            detail = (run / "per_image.md").read_text()
+            self.assertIn("(per_image.md)", main)
+            self.assertIn("(report.md)", detail)
+            self.assertIn("成功 1 / 2", main)
+            self.assertIn("checksum", main)
+            self.assertIn("deblur-abc/good.png", detail)
+            self.assertIn("cannot decode", detail)
+            self.assertIn("待量測", detail)
+            for name in ("laplacian_variance", "tenengrad", "cpbd", "crete_roffet_blur"):
+                self.assertEqual(detail.count(f"| {name} |"), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

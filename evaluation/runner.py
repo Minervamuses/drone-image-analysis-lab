@@ -12,12 +12,19 @@ to one unreadable file would be worse than a report that says which file dropped
 out and why.
 """
 
+import hashlib
+import json
 import random
+import time
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
 import torch
 from PIL import Image
+
+from drone_sr.image_io import read_image, write_png
+from drone_sr.inference import load_model, run_stages
 
 from bicubic import upscale_bicubic
 from degradation import downscale, mod_crop, save_png
@@ -25,6 +32,136 @@ from metrics import load_metric_tensor, psnr, ssim, to_metric_tensor
 from sources import decode_source, discover_sources
 
 DEFAULT_LIMIT = 5
+BLUR_METRICS = ("laplacian_variance", "tenengrad", "cpbd", "crete_roffet_blur")
+
+
+def _pending_metrics() -> dict:
+    return {name: {"value": None, "valid": False, "status": "pending",
+                   "reason": "pending measurement", "debug": {}}
+            for name in BLUR_METRICS}
+
+
+def _model_record(role: str, path: Path) -> dict:
+    record = {"role": role, "path": str(path.resolve()), "sha256": None,
+              "architecture": None, "scale": None, "device": None,
+              "tiling": None, "size_requirements": None}
+    try:
+        with path.open("rb") as stream:
+            record["sha256"] = hashlib.file_digest(stream, "sha256").hexdigest()
+    except (OSError, ValueError) as error:
+        record["error"] = f"{type(error).__name__}: {error}"
+    return record
+
+
+def _describe_model(record: dict, descriptor) -> None:
+    requirements = descriptor.size_requirements
+    record.update(
+        architecture=str(descriptor.architecture.id), scale=descriptor.scale,
+        device=str(descriptor.device), tiling=descriptor.tiling.name,
+        size_requirements={key: getattr(requirements, key)
+                           for key in ("minimum", "multiple_of", "square")},
+    )
+
+
+def run_ordered_batch(sources, run_dir: Path, order, checkpoints: dict, baselines: dict) -> dict:
+    """Run one selected checkpoint combination on the suite's unchanged sample.
+
+    All model/tensor references stay local to this call. Only small image metadata
+    and measurements are shared in ``baselines``; the final PNG is the delivered
+    image. Legacy synthetic SR evaluation continues through ``run_batch``.
+    """
+    order = list(order)
+    if not order or len(order) != len(set(order)) or any(role not in {"sr", "deblur"} for role in order):
+        raise ValueError("Select sr, deblur, or one order containing each once")
+    sources = [Path(source).resolve() for source in sources]
+    models = [_model_record(role, Path(checkpoints[role])) for role in order]
+    identity = [{key: model[key] for key in ("role", "path", "sha256")} for model in models]
+    digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:16]
+    combo_id = f"{'-then-'.join(order)}-{digest}"
+    combo = {"id": combo_id, "order": order, "models": models, "rows": [],
+             "error": None, "elapsed_seconds": None,
+             "resources": {"cuda_peak_allocated_bytes": None, "cuda_peak_reserved_bytes": None}}
+    started = time.perf_counter()
+    stages = []
+    descriptor = image = output = None
+    cuda_devices = set()
+    for source in sources:
+        baseline = baselines.get(str(source), {})
+        combo["rows"].append({
+            "input": str(source), "input_size": baseline.get("input_size"),
+            "output": None, "output_size": None, "status": "failed",
+            "failure_stage": None, "reason": None, "elapsed_seconds": None,
+            "before": baseline.get("before", _pending_metrics()),
+            "after": _pending_metrics(), "changes": _pending_metrics(),
+        })
+    try:
+        output_dir = run_dir / combo_id
+        try:
+            output_dir.mkdir(exist_ok=False)
+        except OSError as error:
+            combo["error"] = f"Output directory: {type(error).__name__}: {error}"
+            for row in combo["rows"]:
+                row.update(failure_stage="output", reason=combo["error"])
+            return combo
+
+        try:
+            for model in models:
+                if model.get("error"):
+                    raise ValueError(f"{model['role']} checkpoint: {model['error']}")
+                descriptor = load_model(Path(model["path"]), role=model["role"])
+                stages.append((model["role"], descriptor))
+                _describe_model(model, descriptor)
+                if descriptor.device.type == "cuda" and descriptor.device not in cuda_devices:
+                    cuda_devices.add(descriptor.device)
+                    torch.cuda.reset_peak_memory_stats(descriptor.device)
+        except Exception as error:
+            combo["error"] = f"Model load: {type(error).__name__}: {error}"
+            for row in combo["rows"]:
+                row.update(failure_stage="model_load", reason=combo["error"])
+            return combo
+
+        names = Counter(f"{source.stem}.png" for source in sources)
+        protected = sources + [Path(model["path"]) for model in models]
+        for source, row in zip(sources, combo["rows"]):
+            row_started = time.perf_counter()
+            stage = "output"
+            destination = output_dir / f"{source.stem}.png"
+            try:
+                if names[destination.name] > 1:
+                    raise ValueError(f"Multiple input files map to output: {destination.name}")
+                if destination.exists() or destination.is_symlink():
+                    raise ValueError(f"Refusing to reuse existing output: {destination}")
+                if any(destination.resolve() == path for path in protected):
+                    raise ValueError(f"Refusing to overwrite input or checkpoint: {destination}")
+                stage = "decode"
+                image = read_image(source)
+                row["input_size"] = (image.shape[-1], image.shape[-2])
+                baseline = baselines.setdefault(str(source), {
+                    "input_size": row["input_size"], "before": _pending_metrics(),
+                })
+                row["before"] = baseline["before"]
+                stage = "inference"
+                output = run_stages(image, stages)
+                stage = "write"
+                write_png(output, destination, source)
+                row.update(status="success", output=str(destination.resolve()),
+                           output_size=(output.shape[-1], output.shape[-2]))
+            except Exception as error:
+                row.update(failure_stage=stage, reason=f"{type(error).__name__}: {error}")
+            finally:
+                row["elapsed_seconds"] = time.perf_counter() - row_started
+                image = output = None
+        return combo
+    finally:
+        if cuda_devices:
+            combo["resources"] = {
+                "cuda_peak_allocated_bytes": sum(torch.cuda.max_memory_allocated(device) for device in cuda_devices),
+                "cuda_peak_reserved_bytes": sum(torch.cuda.max_memory_reserved(device) for device in cuda_devices),
+            }
+        stages.clear()
+        descriptor = image = output = None
+        release_device_memory()
+        combo["elapsed_seconds"] = time.perf_counter() - started
 
 
 @dataclass(frozen=True)

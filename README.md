@@ -1,5 +1,28 @@
 # Drone Image Super-Resolution
 
+
+## 目前 Lab 入口：deblur-only
+
+`lab/run.sh` 現在固定 `--deblur`，預設輸入 `evaluation/data/input/`、取樣 1 張，
+未指定 checkpoint 時只掃 `models/deblur/` 第一層。GPU 不可用就停止。
+
+```bash
+mkdir -p models/sr models/deblur evaluation/data/input
+# 使用者先放入 deblur 權重與原尺寸 PNG/JPG/JPEG；再選單顆小測：
+CUDA_VISIBLE_DEVICES=0 bash lab/run.sh --deblur-model models/deblur/selected.pth --limit 1
+# 同一批圖片遍歷 models/deblur/ 的 checkpoint：
+CUDA_VISIBLE_DEVICES=0 bash lab/run.sh --input evaluation/data/input --limit 1
+```
+
+不需要 SR、GT 或 LPIPS 預訓練權重；一次 run 內共用固定樣本，模型依序載入／釋放。
+新結果是 `evaluation/runs/<new-run>/report.md`、`per_image.md` 與依順序／權重身分區分的輸出資料夾。
+目前 Phase 02 報告標記「待量測」；四指標於 Phase 03 接入。
+legacy SR 僅能明確使用 `.venv/bin/python evaluation/run_evaluation.py --legacy-sr --all`，
+搜尋 `models/sr/`，保持舊退化／三指標語義。Lab 腳本不接受 legacy／SR 模式；
+其他順序由 Python evaluator 使用 `--sr`／`--deblur`，且 SR 必須指定 `--sr-model PATH`。
+`--deblur-model PATH` 可選單顆，不必搬走其他權重。
+尚未在 lab 執行真模型，請先確認可用 GPU／VRAM／RAM 並目視首張結果。
+
 ## 目前一般 CLI：SR／deblur 與處理順序
 
 以下為目前程式介面；後面的歷史執行紀錄與鎖定舊 commit 的 Colab 範例保留其當時語義。
@@ -37,7 +60,7 @@ Docker 使用本次原始碼重新建置時，需在下方 `docker run` 的 imag
 `--sr --sr-model models/sr/model.pth`，models 掛載仍為唯讀；本輪沒有重建或重跑 Docker。
 
 
-## Lab server 測試副本
+## 舊版 SR Lab 流程與歷史紀錄（目前 deblur 請用上方入口）
 
 此 repo 為 [`Minervamuses/drone-image-analysis`](https://github.com/Minervamuses/drone-image-analysis) 的測試副本，程式與既有測試來自 commit `725605585148581eb679836310befdf5612e2499`。只補上本節、`lab/run.sh` 與一張真實小樣本；下方原專案說明保留作為背景。
 

@@ -16,7 +16,8 @@ TIMESTAMP_FORMAT = "%Y%m%dT%H%M%SZ"
 
 
 def create_run_directory(
-    root: Path | None = None, moment: datetime | None = None, name: str | None = None
+    root: Path | None = None, moment: datetime | None = None, name: str | None = None,
+    *, subdirectories=RUN_SUBDIRECTORIES,
 ) -> Path:
     """Create <root>/<UTC timestamp>/ with the run's subdirectories.
 
@@ -27,12 +28,14 @@ def create_run_directory(
     moment = datetime.now(timezone.utc) if moment is None else moment
     run = root / (moment.strftime(TIMESTAMP_FORMAT) if name is None else name)
     run.mkdir(parents=True, exist_ok=False)
-    for name in RUN_SUBDIRECTORIES:
+    for name in subdirectories:
         (run / name).mkdir()
     return run
 
 
-def allocate_run_directory(root: Path | None = None, moment: datetime | None = None) -> Path:
+def allocate_run_directory(
+    root: Path | None = None, moment: datetime | None = None, *, subdirectories=RUN_SUBDIRECTORIES
+) -> Path:
     """A fresh run directory, suffixed if the timestamp is already taken.
 
     Two runs started in the same second both get a directory of their own, which
@@ -44,6 +47,6 @@ def allocate_run_directory(root: Path | None = None, moment: datetime | None = N
     while True:
         name = base if attempt == 1 else f"{base}-{attempt}"
         try:
-            return create_run_directory(root, name=name)
+            return create_run_directory(root, name=name, subdirectories=subdirectories)
         except FileExistsError:
             attempt += 1

@@ -55,6 +55,13 @@ class AllocateRunDirectoryTests(unittest.TestCase):
         for name in RUN_SUBDIRECTORIES:
             self.assertTrue((run / name).is_dir(), name)
 
+    def test_new_suite_can_omit_the_legacy_degradation_directories(self):
+        first = allocate_run_directory(self.root, moment=self.moment, subdirectories=())
+        second = allocate_run_directory(self.root, moment=self.moment, subdirectories=())
+        self.assertNotEqual(first, second)
+        self.assertEqual(list(first.iterdir()), [])
+        self.assertEqual(list(second.iterdir()), [])
+
     def test_a_collision_gets_a_suffix_and_leaves_the_earlier_run_untouched(self):
         first = allocate_run_directory(self.root, moment=self.moment)
         marker = first / "report.md"

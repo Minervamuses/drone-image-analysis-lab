@@ -1,3 +1,22 @@
+# 目前評測介面
+
+新模式使用原尺寸輸入、不讀 GT、不做 legacy 降採樣。至少選 --sr 或 --deblur，出現順序就是處理順序：
+```bash
+.venv/bin/python evaluation/run_evaluation.py --deblur --limit 1
+.venv/bin/python evaluation/run_evaluation.py --deblur --deblur-model models/deblur/selected.pth --limit 1
+.venv/bin/python evaluation/run_evaluation.py --sr --sr-model models/sr/selected.pth --limit 1
+.venv/bin/python evaluation/run_evaluation.py --sr --deblur --sr-model models/sr/selected.pth --limit 1
+.venv/bin/python evaluation/run_evaluation.py --deblur --sr --sr-model models/sr/selected.pth --limit 1
+```
+
+含 deblur 未指定單顆時掃 models/deblur/ 第一層，SR 始終只選一顆。
+--input 預設 evaluation/data/input/，--seed 可重現取樣，--runs-root 指定產物根目錄。
+每次新建 run；report.md／per_image.md 互鏈並列每圖狀態。Phase 02 四指標暫標待量測，不當成量測通過。
+舊模式必須加 --legacy-sr；舊 --model/--all 僅對該模式有效，模型目錄為 models/sr/。
+以下原文件與驗證數字是 legacy 歷史，不能當成新 deblur 成績。Lab 新入口見 [README](../README.md)。
+
+---
+
 # evaluation — SR 線 vs bicubic 基線
 
 一個獨立的評估工具，回答一個問題：

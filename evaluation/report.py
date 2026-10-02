@@ -286,3 +286,96 @@ def describe_environment(
         lpips_backbone_url=backbone_url,
         lpips_backbone_sha256=backbone_sha,
     )
+
+
+def describe_mode_environment(arguments, discovered, selected) -> dict:
+    """Collect run facts without importing LPIPS or initializing a model."""
+    import os
+    import platform
+    from datetime import timezone
+    from importlib.metadata import PackageNotFoundError, version
+
+    import torch
+
+    root = Path(__file__).resolve().parents[1]
+    packages = {}
+    for name in ("torch", "torchvision", "spandrel", "spandrel_extra_arches",
+                 "Pillow", "numpy", "scipy", "opencv-python-headless", "scikit-image"):
+        try:
+            packages[name] = version(name)
+        except PackageNotFoundError:
+            packages[name] = "not installed"
+    facts = {
+        "started_utc": datetime.now(timezone.utc).isoformat(),
+        "git_head": _git(root, "rev-parse", "HEAD"),
+        "worktree": _git(root, "status", "--short"),
+        "python": platform.python_version(),
+        "platform": platform.platform(),
+        "packages": packages,
+        "mode": " -> ".join(arguments.stages),
+        "input_directory": str(arguments.input),
+        "sampling": "sequential" if arguments.seed is None else f"seed={arguments.seed}",
+        "limit": arguments.limit,
+        "discovered": discovered,
+        "selected": [str(path.resolve()) for path in selected],
+        "cuda_runtime": torch.version.cuda,
+        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", "not set"),
+        "precision": "float32; RGB 8-bit PNG; no intermediate quantization",
+        "tiling": "SR 512 core / 32 halo; x1 respects descriptor tiling recommendation",
+    }
+    for name in ("memory.max", "memory.current"):
+        path = Path("/sys/fs/cgroup") / name
+        if path.exists():
+            facts["cgroup_" + name] = path.read_text().strip()
+    return facts
+
+
+def _mode_link(path, run_dir: Path, label: str) -> str:
+    import os
+    from urllib.parse import quote
+
+    if path is None:
+        return "N/A"
+    return f"[{_cell(label)}](<{quote(os.path.relpath(path, run_dir), safe='/')}>)"
+
+
+def write_mode_reports(run_dir: Path, environment: dict, combinations: list[dict]) -> None:
+    """Both views consume the same unrounded records; Phase 02 metrics are pending."""
+    import json
+
+    main = ["# SR / deblur evaluation", "", "[逐張資料](per_image.md)", "",
+            "指標待量測；本階段只驗證處理路徑，不代表去模糊效果。", "",
+            "## 執行環境", "", "| 項目 | 值 |", "|---|---|"]
+    for key, value in environment.items():
+        text = json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else value
+        main.append(f"| {_cell(key)} | {_cell(text)} |")
+    detail = ["# 逐張資料", "", "[主報告](report.md)", ""]
+    for combo in combinations:
+        rows = combo["rows"]
+        success = sum(row["status"] == "success" for row in rows)
+        title = combo["id"]
+        main += ["", f"## {_cell(title)}", "",
+                 f"模式：{' → '.join(combo['order'])}；成功 {success} / {len(rows)}；失敗 {len(rows) - success}。",
+                 f"耗時：{combo.get('elapsed_seconds', 'N/A')} seconds",
+                 f"模型錯誤：{_cell(combo.get('error') or '無')}", "",
+                 "| role | checkpoint | SHA-256 | architecture | scale | device |",
+                 "|---|---|---|---|---|---|"]
+        for model in combo.get("models", []):
+            main.append("| " + " | ".join(_cell(model.get(key, "N/A")) for key in
+                        ("role", "path", "sha256", "architecture", "scale", "device")) + " |")
+        main += ["", "樣本目視入口："]
+        for index, row in enumerate(rows, 1):
+            anchor = f"{title}-{index}"
+            main.append(f"- [{_cell(Path(row['input']).name)}](per_image.md#{anchor})：{row['status']}")
+            detail += [f'<a id="{anchor}"></a>', f"## {_cell(title)} / {_cell(Path(row['input']).name)}", "",
+                       f"順序：{' → '.join(combo['order'])}",
+                       f"input: {_mode_link(row['input'], run_dir, Path(row['input']).name)} / {row.get('input_size')}",
+                       f"output: {_mode_link(row.get('output'), run_dir, 'PNG')} / {row.get('output_size')}",
+                       f"status: {row['status']}; stage: {_cell(row.get('failure_stage'))}; reason: {_cell(row.get('reason'))}",
+                       "", "| 指標 | 前 | 後 | 變化 | 有效性／原因 |",
+                       "|---|---|---|---|---|"]
+            for metric in ("laplacian_variance", "tenengrad", "cpbd", "crete_roffet_blur"):
+                detail.append(f"| {metric} | N/A | N/A | N/A | 待量測 |")
+            detail.append("")
+    write_report(run_dir / "report.md", "\n".join(main) + "\n")
+    write_report(run_dir / "per_image.md", "\n".join(detail) + "\n")
