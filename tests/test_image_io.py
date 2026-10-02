@@ -210,6 +210,28 @@ class ImageIOTests(unittest.TestCase):
             self.assertEqual(output.size, expected.size)
             self.assertEqual(output.tobytes(), expected.tobytes())
 
+    def test_mpo_jpeg_uses_oriented_first_frame_and_preserves_source(self):
+        source = self.root / "drone.JPG"
+        first = Image.new("RGB", (40, 20), (200, 10, 20))
+        first.paste((10, 20, 200), (0, 0, 20, 20))
+        thumbnail = Image.new("RGB", (10, 5), (10, 200, 20))
+        exif = Image.Exif()
+        exif[274] = 6
+        first.save(source, format="MPO", save_all=True, append_images=[thumbnail], exif=exif)
+        original = source.read_bytes()
+        with Image.open(source) as opened:
+            self.assertEqual(opened.format, "MPO")
+            self.assertEqual(opened.n_frames, 2)
+            expected = ImageOps.exif_transpose(opened).convert("RGB")
+        self.assertEqual(expected.size, (20, 40))
+
+        write_png(read_image(source), self.destination, source)
+
+        with Image.open(self.destination) as output:
+            self.assertEqual(output.size, expected.size)
+            self.assertEqual(output.tobytes(), expected.tobytes())
+        self.assertEqual(source.read_bytes(), original)
+
     def test_multi_frame_images_stay_rejected(self):
         first = Image.new("RGB", (4, 2), (10, 20, 30))
         second = Image.new("RGB", (4, 2), (40, 50, 60))

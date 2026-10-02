@@ -25,7 +25,10 @@ def read_image(path: Path) -> torch.Tensor:
     with Image.open(path) as image:
         if image.mode not in {"1", "L", "LA", "P", "RGB", "RGBA", "CMYK"}:
             raise ValueError(f"Unsupported image mode: {image.mode}")
-        if getattr(image, "n_frames", 1) != 1:
+        if image.format == "MPO":
+            # DJI MPO JPEGs store the main image in frame 0.
+            image.seek(0)
+        elif getattr(image, "n_frames", 1) != 1:
             raise ValueError("Only single-frame images are supported")
         # Before anything decodes: Pillow maps 16-bit colour onto RGB/RGBA and
         # then truncates it to 8-bit, so by that point the evidence is gone.
