@@ -180,7 +180,7 @@ class ReportTests(unittest.TestCase):
 
 
 
-class ModeSkeletonReportTests(unittest.TestCase):
+class ModeReportTests(unittest.TestCase):
     def test_two_views_link_sources_outputs_models_and_failures_without_fake_metrics(self):
         from report import write_mode_reports
         with tempfile.TemporaryDirectory() as directory:
@@ -203,9 +203,87 @@ class ModeSkeletonReportTests(unittest.TestCase):
             self.assertIn("checksum", main)
             self.assertIn("deblur-abc/good.png", detail)
             self.assertIn("cannot decode", detail)
-            self.assertIn("待量測", detail)
+            self.assertIn("指標記錄缺失", detail)
             for name in ("laplacian_variance", "tenengrad", "cpbd", "crete_roffet_blur"):
                 self.assertEqual(detail.count(f"| {name} |"), 2)
+
+    def test_two_views_share_raw_records_and_keep_metrics_independent(self):
+        from report import write_mode_reports
+        from test_summary import _mode_combo, _mode_row
+
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory)
+            row = _mode_row("/input/edge.png", 3, 4)
+            row.update(input_size=(65, 67), output_size=(65, 67),
+                       output=str(run / "A/edge.png"), elapsed_seconds=0.123456789123)
+            row["before"]["cpbd"]["debug"] = {"cpbd_edge_count": 42, "cpbd_valid_blocks": 1, "cpbd_mean_edge_width": 2.5}
+            row["after"]["cpbd"].update(value=None, valid=False, status="unmeasurable", reason="no edges after",
+                                        debug={"cpbd_edge_count": 0, "cpbd_valid_blocks": 0, "cpbd_mean_edge_width": None})
+            row["changes"]["cpbd"].update(value=None, valid=False, status="unmeasurable", reason="no edges after")
+            combo = _mode_combo("A", [row])
+            combo.update(elapsed_seconds=0.5, resources={"cuda_peak_allocated_bytes": 123456}, models=[
+                {"role": "deblur", "path": "/models/test.pth", "sha256": "exact-model-sha", "architecture": "Tiny",
+                 "scale": 1, "device": "cpu", "tiling": "DISCOURAGED",
+                 "size_requirements": {"minimum": 1, "multiple_of": 8, "square": False}}])
+            original_value = row["changes"]["laplacian_variance"]["value"]
+            write_mode_reports(run, {"selected": [row["input"]], "packages": {"opencv-python-headless": "fixed-version"}}, [combo])
+            main = (run / "report.md").read_text()
+            detail = (run / "per_image.md").read_text()
+
+            self.assertEqual(row["changes"]["laplacian_variance"]["value"], original_value)
+            self.assertIn("| laplacian_variance | ratio | > 1 | 1.333333333 | 1/1 (100.0%) | 1／0／0 | 1/1 |", main)
+            self.assertIn("ratio: 1.333333333", detail)
+            self.assertIn("成功 1 / 1；失敗 0", main)
+            self.assertIn("CPBD 處理後可量邊緣消失：1 張", main)
+            self.assertIn("| cpbd | no edges after | 1 |", main)
+            self.assertIn('"cpbd_edge_count": 42', detail)
+            self.assertIn('"cpbd_mean_edge_width": 2.5', detail)
+            self.assertIn("valid=False; unmeasurable; no edges after", detail)
+            self.assertIn("[65, 67]", detail)
+            for token in ("exact-model-sha", "DISCOURAGED", "size_requirements", "/models/test.pth"):
+                self.assertIn(token, main)
+                self.assertIn(token, detail)
+            self.assertIn("123456", main)
+            self.assertIn("0.5 seconds", main)
+            self.assertNotIn("debug（前／後／變化）", main)
+            for limitation in ("雜訊", "過銳化", "假紋理", "低紋理"):
+                self.assertIn(limitation, main)
+            self.assertIn("per_image.md#A-1", main)
+            self.assertIn('<a id="A-1"></a>', detail)
+
+    def test_common_sample_coverage_lists_exact_sources_and_no_global_rank_for_bad_model(self):
+        from report import write_mode_reports
+        from test_summary import _mode_combo, _mode_row
+
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory)
+            first = _mode_combo("A", [_mode_row("/one/shared.png"), _mode_row("/one/a.png")])
+            second = _mode_combo("B", [_mode_row("/one/shared.png"), _mode_row("/two/shared.png")])
+            failed = _mode_combo("bad", [{"input": "/one/shared.png", "status": "failed", "reason": "cannot load"}])
+            write_mode_reports(run, {}, [first, second, failed])
+            main = (run / "report.md").read_text()
+            self.assertIn("全體模型 / laplacian_variance：共同有效樣本為空，N/A；不產生全體排名", main)
+            self.assertIn("### 配對模型 / laplacian_variance", main)
+            self.assertIn("共同有效：1/3；覆蓋率 33.3%", main)
+            self.assertIn("共同樣本完整來源：\n- /one/shared.png", main)
+            self.assertNotIn("### 全體模型", main)
+            self.assertNotIn("勝方", main)
+
+    def test_cross_size_report_retains_raw_values_but_rejects_change(self):
+        from report import write_mode_reports
+        from test_summary import _mode_combo, _mode_row
+
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory)
+            row = _mode_row("/input/image.png", 2, 8)
+            row.update(input_size=(16, 16), output_size=(64, 64), output=str(run / "upscaled.png"))
+            combo = _mode_combo("upscale", [row], ("sr", "deblur"))
+            write_mode_reports(run, {}, [combo])
+            main = (run / "report.md").read_text()
+            detail = (run / "per_image.md").read_text()
+            self.assertIn("| laplacian_variance | 2 | valid=True; valid; 無 | 8 | valid=True; valid; 無 | ratio: N/A", detail)
+            self.assertIn("跨尺寸不適用", detail)
+            self.assertIn("| laplacian_variance | ratio | > 1 | N/A | N/A | 0／0／0 | 0/1 |", main)
 
 
 if __name__ == "__main__":

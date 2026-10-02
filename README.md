@@ -1,27 +1,77 @@
 # Drone Image Super-Resolution
 
 
+
 ## 目前 Lab 入口：deblur-only
 
-`lab/run.sh` 現在固定 `--deblur`，預設輸入 `evaluation/data/input/`、取樣 1 張，
-未指定 checkpoint 時只掃 `models/deblur/` 第一層。GPU 不可用就停止。
+本輪本機完成的是程式、synthetic／mock 與四指標驗證。使用者自行 push，再於 lab pull、準備權重與圖片；
+五顆真 checkpoint 的載入、GPU 相容性、實際時間／VRAM／RAM、分塊接縫及去模糊效果尚未驗證。
+本輪沒有跑 SR／combine 真實評測，沒有下載 SR／deblur／AlexNet 預訓練權重。
+
+在 lab 的 Linux repo 根目錄更新既有環境：
 
 ```bash
+git pull --ff-only origin main
+.venv/bin/python -m pip install -r requirements-wsl.txt
+.venv/bin/python -m pip install --no-deps --no-build-isolation -e .
+.venv/bin/python -m pip install -r evaluation/requirements.txt
+.venv/bin/python -m pip check
 mkdir -p models/sr models/deblur evaluation/data/input
-# 使用者先放入 deblur 權重與原尺寸 PNG/JPG/JPEG；再選單顆小測：
-CUDA_VISIBLE_DEVICES=0 bash lab/run.sh --deblur-model models/deblur/selected.pth --limit 1
-# 同一批圖片遍歷 models/deblur/ 的 checkpoint：
-CUDA_VISIBLE_DEVICES=0 bash lab/run.sh --input evaluation/data/input --limit 1
 ```
 
-不需要 SR、GT 或 LPIPS 預訓練權重；一次 run 內共用固定樣本，模型依序載入／釋放。
-新結果是 `evaluation/runs/<new-run>/report.md`、`per_image.md` 與依順序／權重身分區分的輸出資料夾。
-目前 Phase 02 報告標記「待量測」；四指標於 Phase 03 接入。
-legacy SR 僅能明確使用 `.venv/bin/python evaluation/run_evaluation.py --legacy-sr --all`，
-搜尋 `models/sr/`，保持舊退化／三指標語義。Lab 腳本不接受 legacy／SR 模式；
-其他順序由 Python evaluator 使用 `--sr`／`--deblur`，且 SR 必須指定 `--sr-model PATH`。
-`--deblur-model PATH` 可選單顆，不必搬走其他權重。
-尚未在 lab 執行真模型，請先確認可用 GPU／VRAM／RAM 並目視首張結果。
+沒有 .venv 時，先建立 Python 3.12 環境並安裝固定 CUDA wheels，再接上面的三個 pip install／pip check：
+
+```bash
+python3.12 -m venv .venv
+.venv/bin/python -m pip install --no-deps --progress-bar off \
+  'https://download.pytorch.org/whl/cu128/torch-2.11.0%2Bcu128-cp312-cp312-manylinux_2_28_x86_64.whl' \
+  'https://download.pytorch.org/whl/cu128/torchvision-0.26.0%2Bcu128-cp312-cp312-manylinux_2_28_x86_64.whl'
+```
+
+新增依賴固定為 `spandrel_extra_arches==0.2.0`、`opencv-python-headless==4.11.0.86`、
+`scikit-image==0.26.0`；本機 NumPy 2.5.3／SciPy 1.18.1 與 pip check 通過。
+首次框架套件約 4 GB，預留約 15 GB 安裝空間；網路較慢時可能超過十分鐘。
+LPIPS 套件保留供 legacy，deblur 入口不初始化它，也不需要其 AlexNet 權重。
+
+把需要的 checkpoint 放在 `models/deblur/` 第一層；名稱只是識別，報告依實際檔案 SHA-256／架構記錄。
+以下是預定支援與下載來源，使用者自行準備，不代表本機真權重驗收：
+
+| 候選 | 檔名／官方定位 | 來源 | 載入器 |
+|---|---|---|---|
+| FFTformer GoPro | fftformer_GoPro.pth | [官方 releases](https://github.com/kkkls/FFTformer/releases) | Spandrel core |
+| NAFNet GoPro width64 | NAFNet-GoPro-width64.pth | [官方權重](https://drive.google.com/file/d/1S0PVRbyTakYY9a82kujgZLbMihfNBLfC/view) | core |
+| Restormer Motion Deblurring | motion_deblurring.pth | [官方資料夾](https://drive.google.com/drive/folders/1czMyfRTQDX3j3ErByYeZ1PM4GVLbJeGK) | extra arches |
+| Uformer-B GoPro | GoPro/Uformer_B/models/model_best.pth | [官方 repo](https://github.com/ZhendongWang6/Uformer) | core |
+| MPRNet Deblurring | model_deblurring.pth | [官方權重](https://drive.google.com/file/d/1QwQUVbk6YVOJViCsOKYNykCsdJSVGRtb/view) | extra arches |
+
+Uformer 等外部下載可能需要登入；放入第一層時可將 model_best.pth 改為可辨識檔名，避免同名覆蓋。
+Restoration 類別也包含 denoise，仍須核對下載來源。一般 SR／legacy 用 `models/sr/`，本次 deblur 不需要任何 SR。
+GT 目錄／既有檔案保留，不讀、不要求、不刪除。
+
+把少量原尺寸 PNG／JPG／JPEG 放在 `evaluation/data/input/` 第一層。先確認 lab 實際 GPU／記憶體；
+腳本會列 CUDA 裝置、可用 VRAM、host RAM 與 cgroup 限制。GPU 不可用會停止，不改跑 CPU。
+
+```bash
+# 先選一顆，確認輸出、耗時與資源：
+CUDA_VISIBLE_DEVICES=0 bash lab/run.sh --deblur-model models/deblur/fftformer_GoPro.pth --limit 1
+# 確認首張成本後，使用同一批圖片遍歷已放入的 deblur 權重：
+CUDA_VISIBLE_DEVICES=0 bash lab/run.sh --input evaluation/data/input --limit 1
+# 可加 --seed 37 固定隨機取樣；確定資源足夠後才自行增加 --limit。
+```
+
+腳本固定 `--deblur`，允許 `--deblur-model`、`--input`、`--limit`、`--seed`、`--runs-root`；
+不接受 SR／combine／legacy。空模型目錄、空輸入或無 GPU 會明確退出。
+壞權重／壞圖會記錄並繼續其他候選／圖片；指標執行錯誤也使退出碼非零，但保留成功 PNG 與其他分數。
+正常不可量測的 N/A（如沒有 CPBD 邊緣）不當成推論失敗。
+
+每次建立 `evaluation/runs/<new-run>/`，內含互鏈的 `report.md`、`per_image.md` 與各組最終 PNG。
+主報告列逐模型身分／資源／摘要與共同有效樣本；逐張檔保留四值前後／ratio 或 delta／有效性／排除原因／CPBD debug。
+先從樣本連結目視清晰度、雜訊、色偏與 tile 邊界，再決定批量大小。四項分數不合成總分，也不等於去模糊成功率。
+完整四指標定義、來源授權與可選 evaluation 命令見 [evaluation/README.md](evaluation/README.md)。
+
+本機驗證保留使用者原先未提交的 `image_io.py`／`test_image_io.py` DJI MPO 支援；
+依「只提交本次差異」規則，這兩項既有改動未納入本次 commits。若 lab 使用 DJI MPO JPEG，需由使用者另行提交／同步該既有支援。
+本次沒有搬移 `models/model.pth`、修改素材或重建 Docker／Colab。
 
 ## 目前一般 CLI：SR／deblur 與處理順序
 

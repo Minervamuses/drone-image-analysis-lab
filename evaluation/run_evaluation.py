@@ -248,8 +248,16 @@ def main(argv=None) -> int:
         combinations.append(result)
         failures = sum(row["status"] == "failed" for row in result["rows"])
         print(f"{result['id']}: success={len(result['rows']) - failures}, failed={failures}", flush=True)
-        if result.get("error") or failures:
+        metric_errors = sum(
+            record.get("status") == "failed"
+            for row in result["rows"] if row["status"] == "success"
+            for measurements in (row.get("before", {}), row.get("after", {}))
+            for record in measurements.values()
+        )
+        if result.get("error") or failures or metric_errors:
             status = 1
+        if metric_errors:
+            print(f"metric errors : {metric_errors}; successful PNGs retained", flush=True)
         # Persist every completed combination, including failures.
         write_mode_reports(run_dir, environment, combinations)
         release_device_memory()

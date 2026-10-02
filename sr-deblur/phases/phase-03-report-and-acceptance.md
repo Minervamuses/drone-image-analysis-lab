@@ -42,7 +42,7 @@ bash -n lab/run.sh
 git diff --check
 ```
 
-`test_blur_metrics` 是本 phase 預定新增，不是目前已存在／已跑的測試。代表整合案例納入上述既有 test_run_evaluation／test_cli，不另做新 harness。
+`test_blur_metrics` 與代表整合案例已於本 phase 實作；確切命令、成功／失敗及來源比對結果見 build-log。整合沿用既有 test_run_evaluation／test_cli，不另做新 harness。
 收尾檢查之前已通過且未受影響的測試無須反覆跑。完整 evaluation suite 的真權重／LPIPS 案例不作本次無模型完成條件，明列未跑原因。
 
 ## lab 操作交付（本機不執行、不等待）
@@ -57,13 +57,13 @@ git diff --check
 
 ## 驗收條件
 
-- [ ] 四指標核心與必要依賴落地，來源／CPBD授權完整；無 Downloads 執行依賴或高階 API 副作用。
-- [ ] 逐張 ratio／delta、有效性與摘要例子正確；不可量測不填假分數，單一失敗不丟其餘資料。
-- [ ] 本地代表整合串過 deblur、真實指標、安全輸出與兩份報告；CLI／evaluation 同條件輸出一致。
-- [ ] SR／combine 模式架構與跨尺寸標示有 mock／synthetic 證據，本輪沒做其真實評測。
-- [ ] lab deblur-only 命令／模型來源／資料放置／依賴／首張檢查有可操作說明，未驗證限制明列。
-- [ ] 相關便宜回歸有結果，所有本次改動 commit，無 push／切 branch，既有修改保留。
-- [ ] GOALS 本機交付成功條件與 PLANS 完成標準逐項對照後達成；缺 lab 真實結果不阻擋本項。
+- [x] 四指標核心與必要依賴落地，來源／CPBD授權完整；無 Downloads 執行依賴或高階 API 副作用。
+- [x] 逐張 ratio／delta、有效性與摘要例子正確；不可量測不填假分數，單一失敗不丟其餘資料。
+- [x] 本地代表整合串過 deblur、真實指標、安全輸出與兩份報告；CLI／evaluation 同條件輸出一致。
+- [x] SR／combine 模式架構與跨尺寸標示有 mock／synthetic 證據，本輪沒做其真實評測。
+- [x] lab deblur-only 命令／模型來源／資料放置／依賴／首張檢查有可操作說明，未驗證限制明列。
+- [x] 相關便宜回歸有結果，所有本次改動 commit，無 push／切 branch，既有修改保留。
+- [x] GOALS 本機交付成功條件與 PLANS 完成標準逐項對照後達成；缺 lab 真實結果不阻擋本項。
 
 ## 恢復、證據與完成
 

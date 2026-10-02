@@ -1,19 +1,103 @@
-# 目前評測介面
+# SR／deblur 原尺寸四指標評測
 
-新模式使用原尺寸輸入、不讀 GT、不做 legacy 降採樣。至少選 --sr 或 --deblur，出現順序就是處理順序：
+本次 lab 固定 deblur-only，預設 1 張。新 evaluation 至少要一個模式旗標，重複旗標報錯；
+出現順序即執行順序，不自動展開其他順序或 1＋3N 矩陣。
+含 deblur 未指定單顆时，掃 `models/deblur/` 第一層 .pth/.pt/.ckpt/.safetensors，排序並 resolve 去重。
+SR 始終只選一顆明確 `--sr-model PATH`，不固定 ATD、不掃 SR 目錄。
+
 ```bash
 .venv/bin/python evaluation/run_evaluation.py --deblur --limit 1
-.venv/bin/python evaluation/run_evaluation.py --deblur --deblur-model models/deblur/selected.pth --limit 1
+.venv/bin/python evaluation/run_evaluation.py --deblur --deblur-model models/deblur/fftformer_GoPro.pth --limit 1
 .venv/bin/python evaluation/run_evaluation.py --sr --sr-model models/sr/selected.pth --limit 1
 .venv/bin/python evaluation/run_evaluation.py --sr --deblur --sr-model models/sr/selected.pth --limit 1
 .venv/bin/python evaluation/run_evaluation.py --deblur --sr --sr-model models/sr/selected.pth --limit 1
 ```
 
-含 deblur 未指定單顆時掃 models/deblur/ 第一層，SR 始終只選一顆。
---input 預設 evaluation/data/input/，--seed 可重現取樣，--runs-root 指定產物根目錄。
-每次新建 run；report.md／per_image.md 互鏈並列每圖狀態。Phase 02 四指標暫標待量測，不當成量測通過。
-舊模式必須加 --legacy-sr；舊 --model/--all 僅對該模式有效，模型目錄為 models/sr/。
-以下原文件與驗證數字是 legacy 歷史，不能當成新 deblur 成績。Lab 新入口見 [README](../README.md)。
+`--input` 預設 `evaluation/data/input/`；原尺寸 PNG/JPG/JPEG，第一層、固定一次取樣。
+`--seed` 固定隨機取樣；`--runs-root` 預設 evaluation/runs/；相對參數以 repo root 解讀。
+每次新建 run、保留歷史結果。每組 ID 納入順序／checkpoint 路徑／SHA；同 stem 圖片明確拒絕，不讓它們互覆寫。
+模型依組載入與釋放，階段共用 tensor，不寫中間有損檔。
+安裝、模型來源、GPU 前提及 lab 首張命令見 [repo README](../README.md)。
+
+## 四指標與有效性
+
+使用共用 read_image 的 EXIF／RGB／8-bit 規則，轉 uint8 RGB 後以 OpenCV COLOR_RGB2GRAY 取得 float64 灰階 0–255。
+不將 RGB 當 BGR、不 resize、不加強、不換 JPEG。基準每張在同 run 只算一次；
+後值重新解碼**實際交付的最終 PNG**。沒有 GT／PSNR／SSIM／LPIPS 或合成退化。
+
+| 指標 | 固定算法 | deblur 逐張變化 | 朝較清晰方向 |
+|---|---|---|---|
+| laplacian_variance | OpenCV Laplacian CV_64F, ksize=1，變異數 | 後÷前 | >1 |
+| tenengrad | 3×3 Sobel 梯度平方的平均 | 後÷前 | >1 |
+| cpbd | 來源向量化 CPBD；64×64 blocks、原常數與 Canny 規則 | 後−前 | >0 |
+| crete_roffet_blur | skimage blur_effect, h_size=9 | 後−前 | <0 |
+
+比值的前值為 0 記 N/A，保留原值，不加 epsilon。
+CPBD 前後任一方 edge_count=0 時比較無效；有可量邊緣的真 0 分有效，
+逐張保留 edge_count／valid_blocks／mean_edge_width，摘要列處理後邊緣消失張數。
+Crété 非有限結果記不可量測，不把來源的 fallback 1.0 當有效分數；
+在固定 skimage 0.26.0 下，平坦 64×64 圖由函式本身回傳有限 1.0，與原工具相同，
+小至 3×3 的非有限案例另有測試。低紋理分數的解讀仍有限制。
+
+每項獨立記有效性及失敗。處理失敗與指標失敗分開；
+一項失敗不刪除成功圖片或其他分數。明確執行錯誤回傳非零，正常 N/A 不表示推論失敗。
+摘要先逐張算 ratio／delta，再取中位數及朝清晰比例；平手留在有效分母，列反向／排除原因及有效／總數。
+四項不平均成總分，中位數不表示對稱抵消後的總改善量。
+多模型只在該項、該比較的共同有效圖片比較，列樣本完整來源及覆蓋率。
+全體共同集合空就不產生全體排名，仍保留其他模型的有效配對比較。
+
+SR／combine 只列原始前後分數和尺寸，變化／摘要標「跨尺寸不適用」；
+沒有 bicubic／ATD 額外基線或假 GT。本次只驗證這些程式路徑，沒有其真實評測。
+雜訊、過銳化與假紋理可能提高分數，清晰度相關變化不等於真實細節恢復。
+
+## 產物與來源
+
+- `report.md`：環境、版本、模型 SHA／架構／device／descriptor 尺寸與 tiling、逐模型耗時、
+  CUDA peak allocated/reserved（可用時）與 process_max_rss_kib（整個程序截至該組完成的累積峰值，非單模型獨占峰值）、
+  各項摘要、失敗與樣本入口。
+- `per_image.md`：input/output、尺寸、順序、模型身分、未先四捨五入資料生成的四項前後／變化／validity/reason/debug。
+  兩份互鏈，摘要直接從同一批完整精度紀錄計算，只有顯示時格式化。
+- 歷史 runs_summary.md、runs_extracted.json、既有 runs 與 GT 不覆寫。
+
+核心來源為使用者提供的 Downloads/metrics 工具（2026-10-02），已納入 `blur_metrics.py`，
+執行不依賴 Downloads、pandas、原工具 CSV API 或 ThreadPoolExecutor。
+必要調整：RGB tensor 的灰階轉換、各項錯誤隔離、CPBD 無邊緣標記、Crété 非有限不套有效 fallback。
+CPBD 原通知完整保留，授權見 [LICENSE-CPBD.txt](LICENSE-CPBD.txt)，授權檔僅移除原尾端空白。
+來源 SHA-256：
+
+| 原檔 | SHA-256 |
+|---|---|
+| blur_metrics/metrics.py | ccdc3be71793d2098225978150e5310f7079b5530ae0ce8894d6bfdbe1096a37 |
+| blur_metrics/preprocessing.py | d7c643a61519d372edadabe97e75acce8c3607cd92a7cfc5ac6ada900a4cfbbc |
+| LICENSE-CPBD.txt（原始） | f42ed0aacb17b2236f3b8260180f652032d80630f95b6b5dd360ed4d9e2a777a |
+
+## 本機可重跑的無權重檢查
+
+```bash
+.venv/bin/python -m pip check
+CUDA_VISIBLE_DEVICES= OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 PYTHONPATH=src:evaluation \
+  .venv/bin/python -m unittest test_blur_metrics test_summary test_report test_run_evaluation
+CUDA_VISIBLE_DEVICES= OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 PYTHONPATH=src:tests \
+  .venv/bin/python -m unittest test_cli test_inference test_tiling test_image_io
+bash -n lab/run.sh
+```
+
+來源核心數值比對在本機已實際執行；另一台機器沒有原 Downloads 工具時僅該外部比對案例 skip，
+獨立已知數值、有效性、順序和報告檢查仍可執行。不要直接跑全部 legacy 測試：
+部分會初始化 AlexNet／載入真 SR 權重，未列入本次無模型驗收。
+精確結果、曾失敗的檢查與修正見 [build-log](../sr-deblur/build-log.md)。
+
+## 保留的 legacy SR
+
+明確指定 `--legacy-sr` 才執行下方歷史流程；
+`--model NAME`／`--all` 僅用於 legacy，搜尋位置現在是 `models/sr/`：
+
+```bash
+.venv/bin/python evaluation/run_evaluation.py --legacy-sr --all --input lab/sample --limit 1
+.venv/bin/python evaluation/run_evaluation.py --legacy-sr --model model.pth --input lab/sample --limit 1
+```
+
+以下原文件與分數是歷史證據，其舊入口／路徑以本節覆蓋，不能當新 deblur 成績。
 
 ---
 

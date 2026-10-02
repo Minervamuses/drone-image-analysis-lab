@@ -231,9 +231,11 @@ class OrderedBatchTests(unittest.TestCase):
             self.assertEqual(row["output_size"], (14, 10) if "sr" in order else (7, 5))
             self.assertIs(row["before"], baselines[str(source)]["before"])
             for name in BLUR_METRICS:
-                self.assertEqual(row["after"][name]["status"], "pending")
-                self.assertFalse(row["after"][name]["valid"])
-                self.assertIsNone(row["after"][name]["value"])
+                self.assertNotEqual(row["after"][name]["status"], "pending")
+            self.assertEqual(row["after"]["laplacian_variance"]["value"], 0.0)
+            self.assertTrue(row["after"]["laplacian_variance"]["valid"])
+            if "sr" in order:
+                self.assertTrue(all(item["reason"] == "跨尺寸不適用" for item in row["changes"].values()))
             expected = torch.tensor([40, 80, 120], dtype=torch.float32) / 255
             for role in order:
                 expected = expected * 0.5 if role == "sr" else expected + 0.1

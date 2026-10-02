@@ -15,6 +15,7 @@ out and why.
 import hashlib
 import json
 import random
+import resource
 import time
 from collections import Counter
 from dataclasses import dataclass
@@ -32,13 +33,27 @@ from metrics import load_metric_tensor, psnr, ssim, to_metric_tensor
 from sources import decode_source, discover_sources
 
 DEFAULT_LIMIT = 5
-BLUR_METRICS = ("laplacian_variance", "tenengrad", "cpbd", "crete_roffet_blur")
+from blur_metrics import BLUR_METRICS, compare_measurements, failed_measurements, measure_tensor
 
 
-def _pending_metrics() -> dict:
-    return {name: {"value": None, "valid": False, "status": "pending",
-                   "reason": "pending measurement", "debug": {}}
-            for name in BLUR_METRICS}
+def prepare_baselines(sources, baselines: dict) -> None:
+    """Measure each decoded original once, even if the first checkpoint fails."""
+    for source in sources:
+        key = str(source.resolve())
+        if key in baselines:
+            continue
+        try:
+            image = read_image(source)
+        except Exception as error:
+            baselines[key] = {"input_size": None, "decode_error": f"{type(error).__name__}: {error}",
+                              "before": failed_measurements(f"input decode: {error}")}
+            continue
+        try:
+            measured = measure_tensor(image)
+        except Exception as error:
+            measured = failed_measurements(f"input metrics: {type(error).__name__}: {error}")
+        baselines[key] = {"input_size": (image.shape[-1], image.shape[-2]), "before": measured}
+        del image
 
 
 def _model_record(role: str, path: Path) -> dict:
@@ -74,6 +89,7 @@ def run_ordered_batch(sources, run_dir: Path, order, checkpoints: dict, baseline
     if not order or len(order) != len(set(order)) or any(role not in {"sr", "deblur"} for role in order):
         raise ValueError("Select sr, deblur, or one order containing each once")
     sources = [Path(source).resolve() for source in sources]
+    prepare_baselines(sources, baselines)
     models = [_model_record(role, Path(checkpoints[role])) for role in order]
     identity = [{key: model[key] for key in ("role", "path", "sha256")} for model in models]
     digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:16]
@@ -91,8 +107,9 @@ def run_ordered_batch(sources, run_dir: Path, order, checkpoints: dict, baseline
             "input": str(source), "input_size": baseline.get("input_size"),
             "output": None, "output_size": None, "status": "failed",
             "failure_stage": None, "reason": None, "elapsed_seconds": None,
-            "before": baseline.get("before", _pending_metrics()),
-            "after": _pending_metrics(), "changes": _pending_metrics(),
+            "before": baseline.get("before", failed_measurements("input unavailable")),
+            "after": failed_measurements("output unavailable"),
+            "changes": failed_measurements("output unavailable"),
         })
     try:
         output_dir = run_dir / combo_id
@@ -134,11 +151,11 @@ def run_ordered_batch(sources, run_dir: Path, order, checkpoints: dict, baseline
                 if any(destination.resolve() == path for path in protected):
                     raise ValueError(f"Refusing to overwrite input or checkpoint: {destination}")
                 stage = "decode"
+                baseline = baselines[str(source)]
+                if baseline.get("decode_error"):
+                    raise ValueError(baseline["decode_error"])
                 image = read_image(source)
                 row["input_size"] = (image.shape[-1], image.shape[-2])
-                baseline = baselines.setdefault(str(source), {
-                    "input_size": row["input_size"], "before": _pending_metrics(),
-                })
                 row["before"] = baseline["before"]
                 stage = "inference"
                 output = run_stages(image, stages)
@@ -146,6 +163,17 @@ def run_ordered_batch(sources, run_dir: Path, order, checkpoints: dict, baseline
                 write_png(output, destination, source)
                 row.update(status="success", output=str(destination.resolve()),
                            output_size=(output.shape[-1], output.shape[-2]))
+                # Score the delivered, quantized PNG rather than an in-memory prediction.
+                delivered = None
+                try:
+                    delivered = read_image(destination)
+                    row["output_size"] = (delivered.shape[-1], delivered.shape[-2])
+                    row["after"] = measure_tensor(delivered)
+                except Exception as error:
+                    row["after"] = failed_measurements(f"output metrics: {type(error).__name__}: {error}")
+                finally:
+                    delivered = None
+                row["changes"] = compare_measurements(row["before"], row["after"], applicable=order == ["deblur"])
             except Exception as error:
                 row.update(failure_stage=stage, reason=f"{type(error).__name__}: {error}")
             finally:
@@ -158,6 +186,7 @@ def run_ordered_batch(sources, run_dir: Path, order, checkpoints: dict, baseline
                 "cuda_peak_allocated_bytes": sum(torch.cuda.max_memory_allocated(device) for device in cuda_devices),
                 "cuda_peak_reserved_bytes": sum(torch.cuda.max_memory_reserved(device) for device in cuda_devices),
             }
+        combo["resources"]["process_max_rss_kib"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         stages.clear()
         descriptor = image = output = None
         release_device_memory()

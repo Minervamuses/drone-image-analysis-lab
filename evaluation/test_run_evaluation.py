@@ -351,5 +351,162 @@ class LabArgumentsTests(unittest.TestCase):
         self.assertTrue("--help" in result.stdout or any("--help" in call for call in calls))
 
 
+
+class ModeIntegrationTests(unittest.TestCase):
+    setUp = EvaluationSelectionTests.setUp
+    deblur_folder = EvaluationModeTests.deblur_folder
+
+    @staticmethod
+    def descriptor(role, operation=None):
+        import torch
+        from types import SimpleNamespace
+        from spandrel import ImageModelDescriptor, SizeRequirements
+
+        model = torch.nn.Conv2d(3, 3, 1)
+        scale = 2 if role == "sr" else 1
+
+        def forward(module, image):
+            result = image.repeat_interleave(scale, -2).repeat_interleave(scale, -1)
+            return operation(result) if operation else (result * 0.5 if role == "sr" else result + 0.1)
+
+        return ImageModelDescriptor(
+            model, model.state_dict(), architecture=SimpleNamespace(id="Synthetic", name="Synthetic"),
+            purpose="SR" if role == "sr" else "Restoration", tags=[],
+            supports_half=False, supports_bfloat16=False, scale=scale,
+            input_channels=3, output_channels=3,
+            size_requirements=SizeRequirements(minimum=4, multiple_of=4), call_fn=forward,
+        )
+
+    def texture(self):
+        import numpy as np
+        path = self.sources / "good.png"
+        Image.fromarray(np.random.default_rng(23).integers(30, 190, (64, 68, 3), dtype=np.uint8)).save(path)
+        return path
+
+    def test_cli_and_evaluator_match_all_four_routes_with_real_metrics_and_failure_isolation(self):
+        from drone_sr.__main__ import main as cli_main
+        from report import write_mode_reports
+
+        source = self.texture()
+        (self.sources / "bad.png").write_bytes(b"invalid png")
+        originals = {p: p.read_bytes() for p in self.sources.iterdir()}
+        checkpoints = {}
+        for role in ("sr", "deblur"):
+            path = self.models / f"{role}.pth"
+            path.write_bytes(role.encode())
+            checkpoints[role] = path
+        outputs = {}
+        for order in (["sr"], ["deblur"], ["sr", "deblur"], ["deblur", "sr"]):
+            with self.subTest(order=order):
+                args = [f"--{role}" for role in order]
+                for role in order:
+                    args += [f"--{role}-model", str(checkpoints[role])]
+                destination = self.root / ("cli-" + "-".join(order))
+                with (
+                    patch("drone_sr.inference.load_model", side_effect=lambda path, *, role: self.descriptor(role)),
+                    patch("sys.argv", ["drone_sr", *args, "--input", str(self.sources),
+                                       "--output", str(destination)]),
+                    contextlib.redirect_stdout(io.StringIO()),
+                ):
+                    self.assertEqual(cli_main(), 1)  # corrupt sibling; good PNG still delivered
+                with (
+                    patch("runner.load_model", side_effect=lambda path, *, role: self.descriptor(role)),
+                    patch.object(run_evaluation, "write_mode_reports", wraps=write_mode_reports) as report,
+                    patch("torch.hub.download_url_to_file", side_effect=AssertionError("no downloads")),
+                    contextlib.redirect_stdout(io.StringIO()),
+                ):
+                    status = run_evaluation.main([*args, "--input", str(self.sources),
+                                                  "--limit", "2", "--runs-root", str(self.runs)])
+                self.assertEqual(status, 1)
+                run_dir, _, combinations = report.call_args.args
+                self.assertEqual(len(combinations), 1)
+                rows = combinations[0]["rows"]
+                self.assertEqual([r["status"] for r in rows], ["failed", "success"])
+                row = rows[1]
+                self.assertEqual(Path(row["output"]).read_bytes(), (destination / source.name).read_bytes())
+                with Image.open(row["output"]) as image:
+                    outputs[tuple(order)] = image.tobytes()
+                    self.assertEqual(image.size, (136, 128) if "sr" in order else (68, 64))
+                self.assertTrue(all(m["valid"] for m in row["after"].values()), row["after"])
+                if "sr" in order:
+                    self.assertTrue(all(m["reason"] == "跨尺寸不適用" for m in row["changes"].values()))
+                else:
+                    self.assertTrue(all(m["valid"] for m in row["changes"].values()))
+                main = (run_dir / "report.md").read_text()
+                detail = (run_dir / "per_image.md").read_text()
+                self.assertIn("per_image.md", main)
+                self.assertIn("report.md", detail)
+                self.assertNotIn("待量測", main + detail)
+                self.assertIn("bad.png", detail)
+                self.assertIn("cpbd", detail)
+                self.assertIn("cpbd_edge_count", detail)
+        self.assertNotEqual(outputs[("sr", "deblur")], outputs[("deblur", "sr")])
+        for path, before in originals.items():
+            self.assertEqual(path.read_bytes(), before)
+        for role, path in checkpoints.items():
+            self.assertEqual(path.read_bytes(), role.encode())
+
+    def test_baseline_once_with_bad_first_model_and_two_valid_models_without_sr_gt(self):
+        from blur_metrics import measure_tensor
+        from report import write_mode_reports
+
+        self.texture()
+        deblur = self.deblur_folder()
+        for name in ("a-bad.pth", "b.pth", "c.pth"):
+            (deblur / name).write_bytes(name.encode())
+
+        def loader(path, *, role):
+            self.assertEqual(role, "deblur")
+            if path.name == "a-bad.pth":
+                raise ValueError("unsupported synthetic checkpoint")
+            return self.descriptor(role, operation=lambda image: image)
+
+        with (
+            patch("runner.load_model", side_effect=loader),
+            patch("runner.measure_tensor", wraps=measure_tensor) as measure,
+            patch.object(run_evaluation, "write_mode_reports", wraps=write_mode_reports) as report,
+            patch("torch.hub.download_url_to_file", side_effect=AssertionError("no downloads")),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(run_evaluation.main(["--deblur", "--input", str(self.sources),
+                                                  "--runs-root", str(self.runs)]), 1)
+        self.assertEqual(measure.call_count, 3)  # original once plus two delivered PNGs
+        run_dir, _, combinations = report.call_args.args
+        self.assertEqual(len(combinations), 3)
+        before = combinations[0]["rows"][0]["before"]
+        for combo in combinations:
+            self.assertIs(combo["rows"][0]["before"], before)
+        self.assertEqual([c["rows"][0]["status"] for c in combinations], ["failed", "success", "success"])
+        for combo in combinations[1:]:
+            changes = combo["rows"][0]["changes"]
+            self.assertEqual([changes[name]["value"] for name in
+                              ("laplacian_variance", "tenengrad", "cpbd", "crete_roffet_blur")],
+                             [1.0, 1.0, 0.0, 0.0])
+        self.assertFalse((self.root / "GT").exists())
+        self.assertEqual(list(self.models.iterdir()), [])
+        self.assertTrue((run_dir / "per_image.md").is_file())
+
+    def test_metric_execution_failure_preserves_image_other_metrics_and_nonzero_exit(self):
+        from report import write_mode_reports
+
+        self.texture()
+        deblur = self.deblur_folder()
+        (deblur / "model.pth").write_bytes(b"synthetic")
+        with (
+            patch("runner.load_model", side_effect=lambda path, *, role: self.descriptor(role)),
+            patch("blur_metrics.laplacian_variance", side_effect=RuntimeError("isolated metric error")),
+            patch.object(run_evaluation, "write_mode_reports", wraps=write_mode_reports) as report,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(run_evaluation.main(["--deblur", "--input", str(self.sources),
+                                                  "--runs-root", str(self.runs)]), 1)
+        row = report.call_args.args[-1][0]["rows"][0]
+        self.assertEqual(row["status"], "success")
+        self.assertTrue(Path(row["output"]).is_file())
+        self.assertEqual(row["after"]["laplacian_variance"]["status"], "failed")
+        self.assertTrue(row["after"]["tenengrad"]["valid"])
+        self.assertTrue(row["changes"]["tenengrad"]["valid"])
+
+
 if __name__ == "__main__":
     unittest.main()

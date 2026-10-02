@@ -6,7 +6,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from summary import HIGHER_IS_BETTER, decide_winner
+from summary import (BLUR_METRICS, HIGHER_IS_BETTER, decide_winner, mode_change,
+                     summarise_mode, summarise_mode_comparisons)
 
 REQUIRED_HEADER_FIELDS = (
     "執行時間",
@@ -323,6 +324,15 @@ def describe_mode_environment(arguments, discovered, selected) -> dict:
         "precision": "float32; RGB 8-bit PNG; no intermediate quantization",
         "tiling": "SR 512 core / 32 halo; x1 respects descriptor tiling recommendation",
     }
+    if torch.cuda.is_available():
+        facts["gpu_name"] = torch.cuda.get_device_name(0)
+        free, total = torch.cuda.mem_get_info(0)
+        facts["gpu_memory_free_bytes"] = free
+        facts["gpu_memory_total_bytes"] = total
+    memory = Path("/proc/meminfo")
+    if memory.exists():
+        facts["host_memory"] = [line for line in memory.read_text().splitlines()
+                                if line.startswith(("MemTotal:", "MemAvailable:"))]
     for name in ("memory.max", "memory.current"):
         path = Path("/sys/fs/cgroup") / name
         if path.exists():
@@ -339,43 +349,144 @@ def _mode_link(path, run_dir: Path, label: str) -> str:
     return f"[{_cell(label)}](<{quote(os.path.relpath(path, run_dir), safe='/')}>)"
 
 
-def write_mode_reports(run_dir: Path, environment: dict, combinations: list[dict]) -> None:
-    """Both views consume the same unrounded records; Phase 02 metrics are pending."""
+def _mode_value(value) -> str:
     import json
 
+    if value is None:
+        return "N/A"
+    if isinstance(value, (dict, list, tuple)):
+        return _cell(json.dumps(value, ensure_ascii=False, default=str))
+    return _cell(value)
+
+
+def _mode_number(value) -> str:
+    import math
+
+    if value is None:
+        return "N/A"
+    if not isinstance(value, (int, float)) or not math.isfinite(value):
+        return "N/A (non-finite)"
+    return f"{value:.10g}"
+
+
+def _mode_record(row: dict, field: str, name: str) -> dict:
+    return row.get(field, {}).get(name) or {
+        "value": None, "valid": False, "status": "unavailable",
+        "reason": "指標記錄缺失（待量測或未產生）", "debug": {},
+    }
+
+
+def _mode_validity(record: dict) -> str:
+    return _cell(f"valid={bool(record.get('valid'))}; {record.get('status', 'unavailable')}; "
+                 f"{record.get('reason') or '無'}")
+
+
+def _mode_models(models) -> list[str]:
+    fields = ("role", "path", "sha256", "architecture", "scale", "device", "tiling", "size_requirements")
+    lines = ["| role | checkpoint | SHA-256 | architecture | scale | device | tiling | size_requirements |",
+             "|---|---|---|---|---|---|---|---|"]
+    lines += ["| " + " | ".join(_mode_value(model.get(key)) for key in fields) + " |" for model in models]
+    return lines
+
+
+def _mode_summary_table(summary: dict) -> list[str]:
+    lines = ["| 指標 | 逐張變化 | 朝清晰方向 | 變化中位數 | 朝清晰比例 | 朝清晰／平手／反向 | 有效／總數 |",
+             "|---|---|---|---|---|---|---|"]
+    for metric in summary["metrics"].values():
+        direction = "> 1" if metric["kind"] == "ratio" else ("> 0" if metric["higher_is_better"] else "< 0")
+        ratio = metric["improvement_proportion"]
+        proportion = "N/A" if ratio is None else f"{metric['improved']}/{metric['valid']} ({ratio:.1%})"
+        lines.append(f"| {metric['name']} | {metric['kind']} | {direction} | {_mode_number(metric['median_change'])} "
+                     f"| {proportion} | {metric['improved']}／{metric['tied']}／{metric['reversed']} "
+                     f"| {metric['valid']}/{metric['total']} |")
+    lines += ["", "| 指標 | 排除／不可量測原因 | 張數 |", "|---|---|---|"]
+    excluded = False
+    for metric in summary["metrics"].values():
+        for reason, count in metric["exclusions"].items():
+            excluded = True
+            lines.append(f"| {metric['name']} | {_cell(reason)} | {count} |")
+    if not excluded:
+        lines.append("| 全部 | 無 | 0 |")
+    lines += ["", f"CPBD 處理後可量邊緣消失：{summary['metrics']['cpbd']['cpbd_edges_disappeared']} 張。"]
+    return lines
+
+
+def _mode_comparisons(comparisons: dict) -> list[str]:
+    lines = ["", "## 同指標共同有效樣本對照", "",
+             "覆蓋率分母是該比較所有模型選取輸入的聯集；僅使用列出的共同有效圖片，不跨指標合成總分或宣稱最佳模型。"]
+    for name in comparisons["global_unavailable"]:
+        lines += ["", f"全體模型 / {name}：共同有效樣本為空，N/A；不產生全體排名。"]
+    for label, key in (("全體模型", "global"), ("配對模型", "pairwise")):
+        for comparison in comparisons[key]:
+            lines += ["", f"### {label} / {comparison['metric']}", "",
+                      f"模型：{_cell(', '.join(comparison['models']))}",
+                      f"共同有效：{comparison['valid']}/{comparison['total']}；覆蓋率 {comparison['coverage']:.1%}。", "",
+                      "| 模型組合 | 共同樣本的逐張變化中位數 |", "|---|---|"]
+            for identifier, value in comparison["median_changes"].items():
+                lines.append(f"| {_cell(identifier)} | {_mode_number(value)} |")
+            lines += ["", "共同樣本完整來源："]
+            lines += [f"- {_cell(source)}" for source in comparison["inputs"]]
+    if not comparisons["global"] and not comparisons["pairwise"] and not comparisons["global_unavailable"]:
+        lines += ["", "N/A：少於兩個 deblur 模型組合；SR／combine 不作跨尺寸變化比較。"]
+    return lines
+
+
+def write_mode_reports(run_dir: Path, environment: dict, combinations: list[dict]) -> None:
+    """Both views consume the same unrounded records; formatting is render-only."""
     main = ["# SR / deblur evaluation", "", "[逐張資料](per_image.md)", "",
-            "指標待量測；本階段只驗證處理路徑，不代表去模糊效果。", "",
+            "四項指標各自描述清晰度相關變化，不等於去模糊成功率或真實細節恢復。", "",
             "## 執行環境", "", "| 項目 | 值 |", "|---|---|"]
     for key, value in environment.items():
-        text = json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else value
-        main.append(f"| {_cell(key)} | {_cell(text)} |")
+        main.append(f"| {_cell(key)} | {_mode_value(value)} |")
+    main += ["", "## 量測與解讀限制", "",
+             "量測使用同一解碼／EXIF／RGB 8-bit 規則，轉為灰階 0–255；後值來自實際交付 PNG，沒有為計分 resize。",
+             "Laplacian 使用 ksize=1；Tenengrad 使用 3×3 Sobel 梯度平方的平均；CPBD 保留邊緣 debug；Crété h_size=9。",
+             "先算每張後÷前（Laplacian／Tenengrad）或後−前（CPBD／Crété），再取中位數；平手留在有效分母。",
+             "比值前值為 0、CPBD 任一方無可量邊緣、Crété 非有限或單一指標失敗均排除該項，沒有有效分母即 N/A。",
+             "SR／combine 僅列原始前後分數，變化及其摘要標示「跨尺寸不適用」。中位數不代表對稱抵消後的總改善量。",
+             "雜訊與過銳化可能提高梯度分數；假紋理不能當成真實地物細節。低紋理可能無可量邊緣或使指標不可量測。",
+             "請從下方樣本入口目視檢查清晰度、雜訊、色偏與 tile 邊界；此報告不提供未經驗證的畫質勝負結論。"]
     detail = ["# 逐張資料", "", "[主報告](report.md)", ""]
     for combo in combinations:
         rows = combo["rows"]
-        success = sum(row["status"] == "success" for row in rows)
+        summary = summarise_mode(combo)
         title = combo["id"]
         main += ["", f"## {_cell(title)}", "",
-                 f"模式：{' → '.join(combo['order'])}；成功 {success} / {len(rows)}；失敗 {len(rows) - success}。",
-                 f"耗時：{combo.get('elapsed_seconds', 'N/A')} seconds",
-                 f"模型錯誤：{_cell(combo.get('error') or '無')}", "",
-                 "| role | checkpoint | SHA-256 | architecture | scale | device |",
-                 "|---|---|---|---|---|---|"]
-        for model in combo.get("models", []):
-            main.append("| " + " | ".join(_cell(model.get(key, "N/A")) for key in
-                        ("role", "path", "sha256", "architecture", "scale", "device")) + " |")
+                 f"模式：{' → '.join(combo['order'])}；成功 {summary['success']} / {summary['total']}；失敗 {summary['failed']}。",
+                 f"耗時：{_mode_number(combo.get('elapsed_seconds'))} seconds",
+                 f"資源用量：{_mode_value(combo.get('resources'))}",
+                 f"模型錯誤：{_cell(combo.get('error') or '無')}", ""]
+        main += _mode_models(combo.get("models", []))
+        main += [""] + _mode_summary_table(summary)
+        main += ["", "### 處理失敗", "", "| input | 階段 | 原因 |", "|---|---|---|"]
+        for row in rows:
+            if row.get("status") != "success":
+                main.append(f"| {_cell(row['input'])} | {_mode_value(row.get('failure_stage'))} | {_mode_value(row.get('reason'))} |")
+        if not summary["failed"]:
+            main.append("| 無 | — | — |")
         main += ["", "樣本目視入口："]
+        detail += [f"## {_cell(title)}", ""] + _mode_models(combo.get("models", [])) + [""]
         for index, row in enumerate(rows, 1):
             anchor = f"{title}-{index}"
             main.append(f"- [{_cell(Path(row['input']).name)}](per_image.md#{anchor})：{row['status']}")
-            detail += [f'<a id="{anchor}"></a>', f"## {_cell(title)} / {_cell(Path(row['input']).name)}", "",
-                       f"順序：{' → '.join(combo['order'])}",
-                       f"input: {_mode_link(row['input'], run_dir, Path(row['input']).name)} / {row.get('input_size')}",
-                       f"output: {_mode_link(row.get('output'), run_dir, 'PNG')} / {row.get('output_size')}",
-                       f"status: {row['status']}; stage: {_cell(row.get('failure_stage'))}; reason: {_cell(row.get('reason'))}",
-                       "", "| 指標 | 前 | 後 | 變化 | 有效性／原因 |",
-                       "|---|---|---|---|---|"]
-            for metric in ("laplacian_variance", "tenengrad", "cpbd", "crete_roffet_blur"):
-                detail.append(f"| {metric} | N/A | N/A | N/A | 待量測 |")
+            detail += [f'<a id="{anchor}"></a>', f"### {_cell(title)} / {_cell(Path(row['input']).name)}", "",
+                       f"順序：{' → '.join(combo['order'])}；模型身分見本組 checkpoint／SHA-256 表。",
+                       f"input: {_mode_link(row['input'], run_dir, row['input'])} / 尺寸 {_mode_value(row.get('input_size'))}",
+                       f"output: {_mode_link(row.get('output'), run_dir, row.get('output') or 'PNG')} / 尺寸 {_mode_value(row.get('output_size'))}",
+                       f"status: {row['status']}; stage: {_mode_value(row.get('failure_stage'))}; reason: {_mode_value(row.get('reason'))}",
+                       f"耗時：{_mode_number(row.get('elapsed_seconds'))} seconds", "",
+                       "| 指標 | 前 | 前有效性／原因 | 後 | 後有效性／原因 | 變化 | 變化有效性／原因 | debug（前／後／變化） |",
+                       "|---|---|---|---|---|---|---|---|"]
+            for metric in BLUR_METRICS:
+                before = _mode_record(row, "before", metric)
+                after = _mode_record(row, "after", metric)
+                change = mode_change(row, metric, combo["order"])
+                kind = "ratio" if metric in ("laplacian_variance", "tenengrad") else "delta"
+                debug = {"before": before.get("debug", {}), "after": after.get("debug", {}), "change": change.get("debug", {})}
+                detail.append(f"| {metric} | {_mode_number(before.get('value'))} | {_mode_validity(before)} "
+                              f"| {_mode_number(after.get('value'))} | {_mode_validity(after)} "
+                              f"| {kind}: {_mode_number(change.get('value'))} | {_mode_validity(change)} | {_mode_value(debug)} |")
             detail.append("")
+    main += _mode_comparisons(summarise_mode_comparisons(combinations))
     write_report(run_dir / "report.md", "\n".join(main) + "\n")
     write_report(run_dir / "per_image.md", "\n".join(detail) + "\n")
