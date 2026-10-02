@@ -10,6 +10,7 @@ import torch
 from PIL import Image
 
 from drone_sr.__main__ import main
+from test_inference import synthetic_descriptor
 
 
 class CLITests(unittest.TestCase):
@@ -23,15 +24,16 @@ class CLITests(unittest.TestCase):
         Image.new("RGB", (3, 2), color).save(path)
         return path.read_bytes()
 
-    def run_cli(self, args=(), *, cwd=None, model="models/selected.pth", model_error=None):
+    def run_cli(self, args=(), *, cwd=None, model="models/selected.pth", model_error=None,
+                modes=("--sr",)):
         output = io.StringIO()
-        descriptor = SimpleNamespace(device=torch.device("cpu"))
+        descriptor = SimpleNamespace(device=torch.device("cpu"), scale=2)
         model_args = [] if model is None else ["--model", str(model)]
         with (
             contextlib.chdir(cwd or self.root),
             contextlib.redirect_stdout(output),
             contextlib.redirect_stderr(output),
-            patch("sys.argv", ["drone_sr", *model_args, *args]),
+            patch("sys.argv", ["drone_sr", *modes, *model_args, *args]),
             patch("drone_sr.inference.load_model", return_value=descriptor,
                   side_effect=model_error) as loader,
             patch("drone_sr.inference.upscale", side_effect=lambda image, model:
@@ -42,7 +44,7 @@ class CLITests(unittest.TestCase):
             except SystemExit as error:
                 code = error.code
         if loader.called:
-            loader.assert_called_once_with(Path(model))
+            loader.assert_called_once_with(Path(model), role="sr")
         return code, output.getvalue(), loader.call_count, upscale.call_count
 
     def test_model_is_required_even_when_default_checkpoint_exists(self):
@@ -52,7 +54,7 @@ class CLITests(unittest.TestCase):
         checkpoint.touch()
         code, text, loads, calls = self.run_cli(model=None)
         self.assertEqual(code, 2, text)
-        self.assertIn("required: --model", text)
+        self.assertIn("--sr-model", text)
         self.assertEqual((loads, calls), (0, 0))
         self.assertFalse((self.root / "output").exists())
 
@@ -242,11 +244,140 @@ class CLITests(unittest.TestCase):
     def test_help_exposes_model_and_folder_options_without_requiring_a_model(self):
         code, text, loads, calls = self.run_cli(["--help"], model=None)
         self.assertEqual(code, 0)
-        for option in ("--model", "--input", "--output"):
+        for option in ("--sr", "--deblur", "--sr-model", "--model", "--deblur-model",
+                       "--input", "--output"):
             self.assertIn(option, text)
         for option in ("--device", "--tile", "--scale", "--batch", "--overwrite"):
             self.assertNotIn(option, text)
         self.assertEqual((loads, calls), (0, 0))
+
+    def test_no_mode_and_repeated_modes_fail_before_model_loading(self):
+        self.picture(self.root / "input" / "sample.png")
+        for modes in ((), ("--sr", "--sr"), ("--deblur", "--deblur"),
+                      ("--sr", "--deblur", "--sr")):
+            with self.subTest(modes=modes):
+                code, text, loads, calls = self.run_cli(modes=modes)
+                self.assertEqual(code, 2, text)
+                self.assertEqual((loads, calls), (0, 0))
+                self.assertFalse((self.root / "output").exists())
+
+    def invoke_real_inference(self, args, descriptors):
+        output = io.StringIO()
+
+        def load(path, *, role):
+            self.assertEqual(path, Path(f"{role}.pth"))
+            return descriptors[role]
+
+        with (
+            contextlib.chdir(self.root),
+            contextlib.redirect_stdout(output),
+            contextlib.redirect_stderr(output),
+            patch("sys.argv", ["drone_sr", *args]),
+            patch("drone_sr.inference.load_model", side_effect=load) as loader,
+        ):
+            try:
+                code = main()
+            except SystemExit as error:
+                code = error.code
+        return code, output.getvalue(), loader
+
+    def test_four_routes_keep_flag_order_and_require_only_active_checkpoints(self):
+        source = self.root / "input" / "sample.png"
+        before = self.picture(source, (40, 80, 120))
+        outputs = {}
+        routes = (("sr",), ("deblur",), ("sr", "deblur"), ("deblur", "sr"))
+        for roles in routes:
+            with self.subTest(roles=roles):
+                calls = []
+
+                def sr(image):
+                    calls.append("sr")
+                    return image * 0.5
+
+                def deblur(image):
+                    calls.append("deblur")
+                    return image + 0.1
+
+                descriptors = {
+                    "sr": synthetic_descriptor(operation=sr),
+                    "deblur": synthetic_descriptor(scale=1, operation=deblur),
+                }
+                destination = "-".join(roles)
+                args = [f"--{role}" for role in roles]
+                for role in roles:
+                    args.extend((f"--{role}-model", f"{role}.pth"))
+                code, text, loader = self.invoke_real_inference(
+                    [*args, "--output", destination], descriptors)
+                self.assertEqual(code, 0, text)
+                self.assertEqual(calls, list(roles))
+                self.assertEqual([call.kwargs["role"] for call in loader.call_args_list],
+                                 list(roles))
+                expected = torch.tensor([40, 80, 120], dtype=torch.float32) / 255
+                for role in roles:
+                    expected = expected * 0.5 if role == "sr" else expected + 0.1
+                with Image.open(self.root / destination / "sample.png") as result:
+                    self.assertEqual(result.size, (6, 4) if "sr" in roles else (3, 2))
+                    outputs[roles] = result.getpixel((0, 0))
+                    self.assertEqual(outputs[roles], tuple(expected.mul(255).round().int().tolist()))
+                self.assertEqual(source.read_bytes(), before)
+        self.assertNotEqual(outputs[("sr", "deblur")], outputs[("deblur", "sr")])
+
+    def test_enabled_stage_without_its_checkpoint_fails_before_loading(self):
+        self.picture(self.root / "input" / "sample.png")
+        for args in (["--deblur"], ["--sr", "--deblur", "--sr-model", "sr.pth"],
+                     ["--deblur", "--sr", "--deblur-model", "deblur.pth"]):
+            with self.subTest(args=args):
+                code, text, loader = self.invoke_real_inference(args, {})
+                self.assertEqual(code, 2, text)
+                loader.assert_not_called()
+                self.assertFalse((self.root / "output").exists())
+
+    def test_second_stage_failure_keeps_old_output_and_continues_next_image(self):
+        for name in ("a.png", "b.png"):
+            self.picture(self.root / "input" / name)
+        old = self.root / "output" / "a.png"
+        before = self.picture(old, (255, 0, 0))
+        calls = 0
+
+        def fail_once(image):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("synthetic second-stage failure")
+            return image
+
+        code, text, loader = self.invoke_real_inference(
+            ["--sr", "--deblur", "--sr-model", "sr.pth", "--deblur-model", "deblur.pth"],
+            {"sr": synthetic_descriptor(),
+             "deblur": synthetic_descriptor(scale=1, operation=fail_once)},
+        )
+        self.assertNotEqual(code, 0)
+        self.assertEqual(loader.call_count, 2)
+        self.assertEqual(calls, 2)
+        self.assertIn("deblur", text)
+        self.assertIn("synthetic second-stage failure", text)
+        self.assertIn("Processed: 1", text)
+        self.assertIn("Failed: 1", text)
+        self.assertEqual(old.read_bytes(), before)
+        with Image.open(self.root / "output" / "b.png") as result:
+            self.assertEqual(result.size, (6, 4))
+
+    def test_output_alias_cannot_overwrite_selected_checkpoint(self):
+        self.picture(self.root / "input" / "sample.png")
+        checkpoint = self.root / "selected.pth"
+        checkpoint.write_bytes(b"preserve checkpoint")
+        for hardlink in (False, True):
+            with self.subTest(hardlink=hardlink):
+                target = self.root / str(hardlink) / "sample.png"
+                target.parent.mkdir()
+                target.hardlink_to(checkpoint) if hardlink else target.symlink_to(checkpoint)
+                code, text, _, calls = self.run_cli(
+                    ["--output", str(target.parent)], model=checkpoint)
+                self.assertNotEqual(code, 0)
+                self.assertEqual(calls, 0)
+                self.assertEqual(checkpoint.read_bytes(), b"preserve checkpoint")
+                self.assertTrue(target.samefile(checkpoint))
+                self.assertIn("Failed: 1", text)
 
 
 if __name__ == "__main__":

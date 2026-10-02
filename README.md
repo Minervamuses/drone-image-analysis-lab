@@ -1,5 +1,42 @@
 # Drone Image Super-Resolution
 
+## 目前一般 CLI：SR／deblur 與處理順序
+
+以下為目前程式介面；後面的歷史執行紀錄與鎖定舊 commit 的 Colab 範例保留其當時語義。
+本機只驗證 synthetic／mock，新增候選的真權重、GPU 及畫質尚待 lab 實測。
+
+在 Linux／WSL 的 repo 根目錄，沿用下方 Python 3.12 安裝流程及固定版本。
+必要套件為 Spandrel 0.4.2 加上 `spandrel_extra_arches==0.2.0`（已納入 requirements）。
+已有環境更新：
+
+```bash
+.venv/bin/python -m pip install -r requirements-wsl.txt
+.venv/bin/python -m pip install --no-deps --no-build-isolation -e .
+.venv/bin/python -m pip check
+```
+
+由使用者準備 `models/sr/` 與 `models/deblur/`，不自動下載／搬移權重。
+至少指定一個模式，不能重複；只要求啟用階段的權重，`--model` 是 `--sr-model` 別名。
+
+```bash
+.venv/bin/python -m drone_sr --sr --sr-model models/sr/model.pth --input input --output output/sr
+.venv/bin/python -m drone_sr --deblur --deblur-model models/deblur/selected.pth --input input --output output/deblur
+.venv/bin/python -m drone_sr --sr --deblur --sr-model models/sr/model.pth --deblur-model models/deblur/selected.pth --input input --output output/sr-deblur
+.venv/bin/python -m drone_sr --deblur --sr --deblur-model models/deblur/selected.pth --sr-model models/sr/model.pth --input input --output output/deblur-sr
+```
+
+階段間不寫中間圖片，只在最終輸出 PNG；FP32，512 core／32 halo，descriptor 負責 padding／裁回。
+不適合外部分塊的 deblur descriptor 走完整圖片，因此大圖記憶體需求仍待 lab 確認，失敗不改用 CPU 重跑。
+SR 要 RGB／SR／scale>1，deblur 要 RGB／Restoration／scale=1；Restoration 也可能是 denoise，
+必須另核對來源。核心＋官方 extra registry 覆蓋 FFTformer、NAFNet、Restormer、Uformer、MPRNet，
+這不代表五顆真權重已載入驗收。
+
+每張失敗會續行；第二階段失敗不會覆寫既有成功檔，也不計新成功。
+一般 CLI 可原子替換同名舊輸出，因此上述四模式使用不同輸出目錄。
+Docker 使用本次原始碼重新建置時，需在下方 `docker run` 的 image 名稱後明確加上
+`--sr --sr-model models/sr/model.pth`，models 掛載仍為唯讀；本輪沒有重建或重跑 Docker。
+
+
 ## Lab server 測試副本
 
 此 repo 為 [`Minervamuses/drone-image-analysis`](https://github.com/Minervamuses/drone-image-analysis) 的測試副本，程式與既有測試來自 commit `725605585148581eb679836310befdf5612e2499`。只補上本節、`lab/run.sh` 與一張真實小樣本；下方原專案說明保留作為背景。
