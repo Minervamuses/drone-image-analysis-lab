@@ -1,0 +1,10 @@
+# Only the inference package and its installation manifests enter the context.
+# This excludes checkpoints, images, outputs, caches, tests and Git metadata.
+**
+!requirements-wsl.txt
+!pyproject.toml
+!src/
+src/*
+!src/drone_sr/
+src/drone_sr/*
+!src/drone_sr/*.py

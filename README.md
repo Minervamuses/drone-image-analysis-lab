@@ -110,9 +110,77 @@ Docker 使用本次原始碼重新建置時，需在下方 `docker run` 的 imag
 `--sr --sr-model models/sr/model.pth`，models 掛載仍為唯讀；本輪沒有重建或重跑 Docker。
 
 
+## Google Colab：單張上傳或 Google Drive 資料夾
+
+新增筆記本 [`colab/drone_sr_colab.ipynb`](colab/drone_sr_colab.ipynb)。在 [Google Colab](https://colab.research.google.com/) 使用「檔案 → 上傳筆記本」開啟此檔，切換為 GPU 執行階段，執行第 1、2 步並選擇模型權重後，再執行第 3–6 步；不需先將本次修改推送到 GitHub。
+
+- **單張圖片**：第 3 步選 `INPUT_MODE="upload"`，選取一張圖片，完成後可預覽並下載 PNG 與執行 log。
+- **Drive 資料夾**：選 `INPUT_MODE="drive"`，設定掛載後的 `DRIVE_INPUT`／`DRIVE_OUTPUT` 絕對路徑並授權掛載。預設 `DRIVE_LIMIT=1` 先驗證一張，改成 `0` 才處理資料夾第一層的全部支援圖片。
+- **模型權重**：第 2 步預設掛載並讀取 `/content/drive/MyDrive/models`，可修改 `DRIVE_MODELS`。資料夾第一層的 `.pth`／`.pt`／`.ckpt`／`.safetensors` 會列成下拉選單；請先將權重放入 Drive，再從選單選擇。新增或刪除權重後重跑第 2 步即可更新清單，不再自動下載固定模型。
+- 第 4 步使用下拉選單當前選取的權重，沿用既有 `python -m drone_sr --model … --input … --output …`。每輪建立新目錄，保留原圖、逐張成功／失敗訊息及 `run.log`，並記錄權重路徑與 SHA-256 供追溯；沒有 CUDA GPU 時停止。
+- Colab 保留預裝的 PyTorch／torchvision／NumPy／Pillow，只安裝 Spandrel 0.4.2 與缺少的傳遞依賴。程式取自公開 commit `7a7c6ee8859754d5162bec032133b5bd7d2a103e`，不會帶入本機尚未提交的修改（包含 DJI MPO 主圖支援）。
+
+已在 WSL 通過 Notebook 結構／語法與模擬流程檢查：權重掃描、切換選單、空資料夾／移除檔案、重掃清除舊選項、CLI 模型參數及 SHA-256 log。原有圖片上傳／Drive 路徑、部分失敗、重跑與 ZIP 流程先前已通過模擬檢查。Colab 實際的 Google 登入、Drive 掛載、選單互動、套件安裝與 GPU 推論尚未驗證；本機檢查不能代表 Colab 已跑通。先用一張小圖確認結果及耗時，再增加數量。Colab 工作階段結束可能刪除 `/content`，上傳模式請及時下載；Drive 模式輸出存於指定的 Drive 資料夾。平台資源與檔案保存限制見 [Colab 官方 FAQ](https://research.google.com/colaboratory/faq.html)。
+
+## Docker：資料夾批次超解析度
+
+使用 Linux x86_64 容器，入口為既有的 `python -m drone_sr`。第一次建置 image 並準備 checkpoint 後，每次只需把圖片放入 `input/`、執行下方 `docker run`，結果就會出現在主機的 `output/`。
+
+### 環境與第一次建置
+
+在 Linux／WSL shell、repo 根目錄執行。主機需已安裝並啟動 [Docker Engine](https://docs.docker.com/engine/install/ubuntu/)，目前使用者需有執行 Docker 的權限。NVIDIA GPU 執行另需相容的主機 driver，以及已設定 Docker runtime 的 [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)。Windows 可使用 Docker Desktop 的 WSL 2 backend，並啟用此 Ubuntu 的 WSL integration；GPU 前提見 [Docker Desktop GPU 說明](https://docs.docker.com/desktop/features/gpu/)。
+
+若使用 Docker Engine 的預設權限設定，將下方命令開頭的 `docker` 改成 `sudo docker` 即可。請仍在一般使用者的 shell 執行，讓 `--user "$(id -u):$(id -g)"` 使用自己的 UID／GID。
+
+```bash
+docker build -t drone-sr .
+mkdir -p input output models
+```
+
+image 沿用 `requirements-wsl.txt` 的 Python 3.12、PyTorch 2.11.0／torchvision 0.26.0 CUDA 12.8 wheels、Spandrel 0.4.2 與 Pillow 12.3.0。首次需連線 Docker Hub、PyTorch、NVIDIA 套件站與 PyPI；套件下載約 4 GB，建議預留至少 20 GB 磁碟給 image、建置暫存與輸出，時間取決於網路，可能超過十分鐘。CUDA runtime 隨 Python 套件提供，主機不需另外安裝 CUDA Toolkit。
+
+### 準備 checkpoint 與圖片
+
+第一次請將相容的 RGB SR checkpoint 放為 `models/model.pth`。可下載既有預設的 [realesr-general-x4v3.pth（官方，約 4.9 MB）](https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-x4v3.pth) 並存成這個檔名；專案已記錄的 SHA-256 為 `8dc7edb9ac80ccdc30c3a5dca6616509367f05fbc184ad95b731f05bece96292`。已有該檔案便可直接沿用。
+
+將要處理的圖片放在 `input/` 第一層，支援 JPG／JPEG／PNG／TIF／TIFF。`output/` 必須是不同的資料夾，且目前使用者可寫入。權重、圖片與輸出都留在主機；image 不包含 checkpoint、測試圖片、歷次輸出、cache 或 Git metadata。
+
+### 執行
+
+有 NVIDIA GPU 時：
+
+```bash
+docker run --rm --gpus all \
+  --user "$(id -u):$(id -g)" \
+  --mount "type=bind,source=$(pwd)/input,target=/app/input,readonly" \
+  --mount "type=bind,source=$(pwd)/output,target=/app/output" \
+  --mount "type=bind,source=$(pwd)/models,target=/app/models,readonly" \
+  drone-sr
+```
+
+沒有 NVIDIA GPU 時，使用同一條命令並刪掉 `--gpus all`，程式會依既有邏輯選用 CPU。Docker 的 GPU 參數只負責讓裝置可見；實際選擇仍由 `torch.cuda.is_available()` 決定。確認 log 的 `Device: cuda:0 (...)` 或 `Device: cpu`；CUDA 執行失敗仍按原有流程報錯，不會改成 CPU 重跑。CPU 請先以一張小圖確認耗時。
+
+例如 `input/DJI_001.JPG` 會產生 `output/DJI_001.png`，終端機顯示逐張結果與 `Processed`／`Failed` 摘要。input 與 models 以唯讀方式掛載；`--user` 讓輸出屬於主機使用者，保留程式既有的 `0600` 權限。若要使用其他主機資料夾，只需替換各個 `source=` 的絕對路徑，容器內的 `target=` 保持不變。
+
+checkpoint 固定讀取 **`/app/models/model.pth`**。需要換模型時，在容器結束後替換主機的 `models/model.pth`，再執行同一條 `docker run`，**不需 rebuild image**。若使用 symlink，目標檔也必須放在掛載的 `models/` 內，並使用相對 symlink。程式不會自動下載 checkpoint。
+
+這個 image 提供 SR 批次推論；`evaluation/`、`lab/run.sh` 與其 LPIPS 依賴仍依下方原有方式執行。
+
+### Docker 驗證狀態
+
+**2026-09-20，在本機 Ubuntu 24.04／WSL 實際驗證：** Docker Engine 29.8.1、NVIDIA Container Toolkit 1.20.1、driver 591.74、RTX 5070 Ti Laptop GPU。image 內為 Python 3.12.14，主要依賴版本與上方一致。
+
+- `docker build -t drone-sr .` 成功；首次下載與建置約 5 分 27 秒，之後修正使用建置快取。`pip check` 通過，33 項既有主程式測試在容器內全數通過。測試目錄只在驗證時唯讀掛載，不包含在 image。
+- 使用上方 GPU 命令，把 input 的 `source=` 換成 `$(pwd)/lab/sample`，掛載既有正式 Compact checkpoint：`Device: cuda:0`、`Processed: 1`／`Failed: 0`、退出碼 0，約 5.59 秒（包含容器啟動）。512×512 輸入產生 **2048×2048 RGB PNG**，檔案為 3,647,135 bytes，已完整解碼並開啟檢視。
+- GPU 輸出 SHA-256 為 `db7142ab8ccb9797c411af711ddb44a3b26f45b4b35e30ca987cda810289a33a`，與先前相同圖片、checkpoint 的原生 WSL GPU 結果**逐位元相同**。原圖與 checkpoint 的 SHA-256 不變；輸出屬於主機使用者，權限為 `0600`。
+- 省略 `--gpus all`，以同一張圖片與 checkpoint 實跑 CPU：`Device: cpu`、`Processed: 1`／`Failed: 0`，輸出可解碼為 2048×2048 RGB PNG。不掛載 checkpoint 時，回報 `SR model not found: models/model.pth` 並以 1 退出。
+- 已檢查 image 的 `/app`：只有兩個安裝設定檔、五個原始碼檔與空的 input／output／models 目錄，沒有 checkpoint、圖片、Git metadata、測試或原始碼快取。Dockerfile 固定 PyTorch 暫存目錄，支援 `--user` 傳入容器內沒有帳號名稱的主機 UID。
+
+這次 Docker 驗證限於上述小樣本。其他主機、Docker Desktop、其他 checkpoint 與大圖容器推論尚未驗證；下方原生 WSL／Lab 的歷史測試不代表這些 Docker 情境已通過。
+
 ## 舊版 SR Lab 流程與歷史紀錄（目前 deblur 請用上方入口）
 
-此 repo 為 [`Minervamuses/drone-image-analysis`](https://github.com/Minervamuses/drone-image-analysis) 的測試副本，程式與既有測試來自 commit `725605585148581eb679836310befdf5612e2499`。只補上本節、`lab/run.sh` 與一張真實小樣本；下方原專案說明保留作為背景。
+此 repo 為 [`Minervamuses/drone-image-analysis`](https://github.com/Minervamuses/drone-image-analysis) 的測試副本，程式與既有測試來自 commit `725605585148581eb679836310befdf5612e2499`。Lab 測試入口為 `lab/run.sh`，並附一張真實小樣本；上方另提供批次推論的 Docker 操作方式，下方原專案說明保留作為背景。
 
 ### 第一次 clone 與安裝
 
@@ -220,7 +288,7 @@ Lab server 的安裝與 GPU 執行尚待使用者實跑；本次也未重新建�
 
 **會做：** 資料夾批次；逐張隔離失敗並給出 `Processed`／`Failed` 摘要與退出碼；自動選用 CUDA 或 CPU；超過 512 的圖自動分塊；讀入時依 EXIF Orientation 校正方向；拒絕多頁、高位深與浮點來源。
 
-**不會做：** 不下載權重；不遞迴掃描子資料夾；不轉換影片；**本 pipeline 本身不計算任何畫質指標**，也不做模型排名；不保存 alpha、EXIF、GIS 等 metadata；不提供 Docker 映像。
+**不會做：** 不下載權重；不遞迴掃描子資料夾；不轉換影片；**本 pipeline 本身不計算任何畫質指標**，也不做模型排名；不保存 alpha、EXIF、GIS 等 metadata。Docker 建置與執行方式見本文開頭。
 
 PSNR／SSIM／LPIPS 由另一個獨立工具 [`evaluation/`](evaluation/README.md) 提供，它以合成退化自造真值，比較本 pipeline 與 bicubic 放大。該工具只 import `src/drone_sr/` 的公開函式，不改動它，產物也只寫在 `evaluation/runs/` 之下。
 
@@ -370,8 +438,8 @@ python -m drone_sr --input "/path/to/images" --output "/path/to/sr-results"
 - 畫質：已開啟原圖與輸出檢視，海面構圖、反光位置與色彩正常，但細紋較平滑；未證明新增紋理是真實地物細節。小裁切的 VRAM 有餘裕，不能據此承諾 4K 全圖或整段影片效能。
 - 畫質量化：手上仍**沒有**配對且對齊的高解析度真值，因此本 pipeline 的輸出本身不附 PSNR／SSIM。[`evaluation/`](evaluation/README.md) 繞開這個缺口的方式是**自造真值**——拿高解析原圖降採樣成低解析輸入，再由本 pipeline 與 bicubic 各自放大回去與原圖比對。數字因此只在「純 bicubic 退化」這個前提下成立，不能當成真實低解析影像上的畫質排名。5 張 4056×3040 樣本（CPU）的實測是 **bicubic 在 PSNR 與 SSIM 上全勝、本 pipeline 在 LPIPS 上全勝**；這是 GAN 類 SR 在乾淨 bicubic 基準上的已知傾向，解讀前提見該工具的 README。
 - 驗收資料只來自使用者指定的單一 [WhaleDrone](https://huggingface.co/datasets/LucieLprt-Dvldr/WhaleDrone) MP4（資料集標示 CC-BY-NC-4.0），沒有下載 SRT 或其他影片。結果是海面場景，沒有鯨魚／道路／屋頂細節驗收。
-- 不含整段影片轉換與 Docker 映像。
-- 未重新建立第二套乾淨環境驗證安裝。
+- 不含整段影片轉換；Docker 的獨立驗證狀態見本文開頭。
+- 既有 WSL 歷史驗收未重新建立第二套乾淨環境驗證安裝。
 - 圖片、權重與 `test-data/` 不納入 Git；另一台機器需自行準備 `models/model.pth` 與素材。
 
 ### 重跑檢查
