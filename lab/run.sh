@@ -16,10 +16,13 @@ export TORCH_HOME="${TORCH_HOME:-$ROOT/models/torch-cache}"
 exec "$PYTHON" -u - "$@" <<'PY'
 import argparse
 import csv
+import gc
 import json
+import math
 import os
 import random
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -38,6 +41,14 @@ SHARPNESS_METRICS = ("laplacian_variance", "tenengrad", "cpbd", "crete_roffet_bl
 SHARPNESS_FIELDS = (
     "image", "kind", "model", "condition", "path", *SHARPNESS_METRICS,
     "status", "invalid_metrics", "error",
+)
+REFERENCE_FIELDS = (
+    "image", "condition", "blur_params", "model", "original_path", "input_path", "output_path",
+    "psnr", "ssim", "lpips", "status", "error",
+)
+SUMMARY_FIELDS = (
+    "model", "n_expected", "n_success", "n_failed", "psnr_mean", "ssim_mean", "lpips_mean",
+    "psnr_inf_count", "status",
 )
 
 
@@ -89,7 +100,8 @@ def make_kernels():
     points *= arc["max_xy_span_px"] / np.ptp(points, axis=0).max()
     gaussian = CONDITIONS["gaussian"]
     line = cv2.getGaussianKernel(gaussian["kernel_size"], gaussian["sigma_px"], cv2.CV_64F)
-    return {"linear": linear, "trajectory": rasterize(points), "gaussian": line @ line.T}
+    gaussian = line @ line.T
+    return {"linear": linear, "trajectory": rasterize(points), "gaussian": gaussian / gaussian.sum()}
 
 
 def blur_image(image, condition, kernels):
@@ -110,7 +122,10 @@ def sharpness_row(record, kind, model, path, image=None, error=""):
         row.update({name: None for name in SHARPNESS_METRICS})
         row.update(status="failed", invalid_metrics=";".join(SHARPNESS_METRICS), error=error)
         return row
-    measurements = measure_tensor(image)
+    try:
+        measurements = measure_tensor(image)
+    except Exception as exc:
+        return sharpness_row(record, kind, model, path, error=f"sharpness: {type(exc).__name__}: {exc}")
     invalid = [name for name in SHARPNESS_METRICS if not measurements[name]["valid"]]
     row.update({name: measurements[name]["value"] for name in SHARPNESS_METRICS})
     row.update(
@@ -142,6 +157,7 @@ def prepare_inputs(sources, run, sharpness):
         image = prepared = None
         try:
             image = read_image(source)
+            print(f"Input {source.name}: {image.shape[-1]}x{image.shape[-2]}", flush=True)
             sharpness.append(sharpness_row(record, "original", "", source, image))
             prepared = blur_image(image, condition, kernels)
             write_png(prepared, destination, source)
@@ -158,8 +174,115 @@ def prepare_inputs(sources, run, sharpness):
     return records
 
 
+def infer_model(checkpoint, records, run):
+    model = checkpoint.relative_to(MODELS).as_posix()
+    descriptor, load_error = None, ""
+    rows = []
+    try:
+        descriptor = load_model(checkpoint, role="deblur")
+        if descriptor.device.type != "cuda":
+            raise RuntimeError("deblur must run on CUDA; CPU fallback is disabled")
+        print(f"Model: {model}; architecture: {descriptor.architecture.name}; device: {descriptor.device}", flush=True)
+    except Exception as exc:
+        load_error = f"model load: {type(exc).__name__}: {exc}"
+        print(f"FAIL {model}: {load_error}", flush=True)
+    try:
+        for index, record in enumerate(records):
+            destination = run / "outputs" / model / (record["image"] + ".png")
+            row = dict(record, model=model, output_path=str(destination), psnr=None, ssim=None, lpips=None,
+                       status="failed", error="; ".join(filter(None, (record["error"], load_error))))
+            image = result = None
+            try:
+                if not row["error"]:
+                    image = read_image(Path(record["input_path"]))
+                    result = upscale(image, descriptor)
+                    if result.shape != image.shape:
+                        raise ValueError(f"Expected original-size {tuple(image.shape)}, got {tuple(result.shape)}")
+                    write_png(result, destination, Path(record["input_path"]))
+                    row["status"] = "saved"
+            except Exception as exc:
+                row["error"] = f"inference/save: {type(exc).__name__}: {exc}"
+            finally:
+                del image, result
+                if row["status"] == "failed":
+                    torch.cuda.empty_cache()
+            rows.append(row)
+            print(f"Inference {model} {index + 1}/{len(records)}: {row['status']} {row['error']}", flush=True)
+    finally:
+        # LPIPS is loaded only after the restoration model and its tensors are gone.
+        del descriptor
+        gc.collect()
+        torch.cuda.empty_cache()
+    return rows
+
+
+def score_outputs(rows, sharpness):
+    perceptual, lpips_error = None, ""
+    if any(row["status"] == "saved" for row in rows):
+        try:
+            perceptual = PerceptualMetric(device="cuda:0")
+        except Exception as exc:
+            lpips_error = f"LPIPS load: {type(exc).__name__}: {exc}"
+            gc.collect()
+            torch.cuda.empty_cache()
+            print(f"FAIL {lpips_error}", flush=True)
+    try:
+        for row in rows:
+            if row["status"] != "saved":
+                sharpness.append(sharpness_row(row, "model_output", row["model"], row["output_path"], error=row["error"]))
+                continue
+            original = restored = None
+            sharpness_written = False
+            errors = []
+            try:
+                # Measure the delivered PNG; GT is always the EXIF/MPO-decoded original.
+                restored = read_image(Path(row["output_path"]))
+                sharpness.append(sharpness_row(row, "model_output", row["model"], row["output_path"], restored))
+                sharpness_written = True
+                original = read_image(Path(row["original_path"]))
+                # Match metrics.py's integer RGB levels [0,255], without float32 decode roundoff.
+                original.mul_(255).round_()
+                restored.mul_(255).round_()
+                for name, metric in (("psnr", psnr), ("ssim", ssim), ("lpips", perceptual)):
+                    try:
+                        if metric is None:
+                            raise RuntimeError(lpips_error)
+                        value = float(metric(original, restored))
+                        if not math.isfinite(value) and not (name == "psnr" and value == math.inf):
+                            raise ValueError("non-finite metric result")
+                        row[name] = value
+                    except Exception as exc:
+                        errors.append(f"{name}: {type(exc).__name__}: {exc}")
+            except Exception as exc:
+                errors.append(f"metric input: {type(exc).__name__}: {exc}")
+            finally:
+                del original, restored
+                if errors:
+                    torch.cuda.empty_cache()
+            row.update(status="failed" if errors else "ok", error="; ".join(errors))
+            if not sharpness_written:
+                sharpness.append(sharpness_row(row, "model_output", row["model"], row["output_path"], error=row["error"]))
+            print(f"Metrics {row['model']} {row['image']}: {row['status']} {row['error']}", flush=True)
+    finally:
+        del perceptual
+        gc.collect()
+        torch.cuda.empty_cache()
+
+
+def summarize(model, rows):
+    successful = [row for row in rows if row["status"] == "ok"]
+    count = len(successful)
+    summary = dict(model=model, n_expected=len(rows), n_success=count, n_failed=len(rows) - count,
+                   psnr_inf_count=sum(row["psnr"] == math.inf for row in successful),
+                   status="partial" if count < len(rows) else "ok")
+    for name in ("psnr", "ssim", "lpips"):
+        summary[name + "_mean"] = sum(row[name] for row in successful) / count if count else None
+    return summary
+
+
 def main():
     args = parse_args()  # --help exits before importing ML packages or requiring data/weights.
+    started = time.perf_counter()
     sources = sorted(path for path in INPUT.iterdir()
                      if path.is_file() and path.suffix.lower() in {".png", ".jpg", ".jpeg"}) if INPUT.is_dir() else []
     random.Random(SEED).shuffle(sources)
@@ -172,24 +295,72 @@ def main():
         raise SystemExit(f"error: no PNG/JPG/JPEG inputs in {INPUT}; prepare the lab data, no download attempted.")
     if not checkpoints:
         raise SystemExit(f"error: no deblur checkpoints in {MODELS}; prepare the lab weights, no download attempted.")
-    global np, cv2, torch, read_image, write_png, measure_tensor
+    global np, cv2, torch, read_image, write_png, measure_tensor, load_model, upscale, psnr, ssim, PerceptualMetric
     sys.path[:0] = [str(ROOT / "src"), str(ROOT / "evaluation")]
     try:
         import numpy as np
         import cv2
         import torch
+        import lpips
         from drone_sr.image_io import read_image, write_png
+        from drone_sr.inference import load_model, upscale
         from blur_metrics import measure_tensor
-    except ImportError as exc:
-        raise SystemExit(f"error: existing lab dependencies are missing: {exc}; no installation attempted.") from exc
+        from metrics import psnr, ssim
+        from perceptual import PerceptualMetric
+    except Exception as exc:
+        raise SystemExit(f"error: existing lab dependencies are unavailable: {type(exc).__name__}: {exc}; no installation attempted.") from exc
+
+    def no_download(*args, **kwargs):
+        raise RuntimeError("Automatic weight downloads are disabled; prepare the existing lab cache manually")
+
+    torch.hub.download_url_to_file = no_download
+    cache = Path(torch.hub.get_dir()) / "checkpoints/alexnet-owt-7be5be79.pth"
+    calibration = Path(lpips.__file__).resolve().parent / "weights/v0.1/alex.pth"
+    for path in (cache, calibration):
+        if not path.is_file():
+            raise SystemExit(f"error: required existing LPIPS weights missing: {path}; no download attempted.")
+    if not torch.cuda.is_available():
+        raise SystemExit("error: CUDA is unavailable; fix lab GPU access. CPU fallback is disabled.")
+    try:
+        torch.ones(1, device="cuda:0").sum().item()
+        free, total = torch.cuda.mem_get_info()
+    except Exception as exc:
+        raise SystemExit(f"error: lab CUDA preflight failed: {type(exc).__name__}: {exc}") from exc
+    print(f"torch: {torch.__version__}; CUDA runtime: {torch.version.cuda}; GPU: {torch.cuda.get_device_name(0)}", flush=True)
+    print(f"CUDA_VISIBLE_DEVICES: {os.environ['CUDA_VISIBLE_DEVICES']}; free/total VRAM bytes: {free}/{total}", flush=True)
+    print(f"PSNR/SSIM: CPU float64; LPIPS: cuda:0; cache: {cache}", flush=True)
+    print(Path("/proc/meminfo").read_text().splitlines()[:3], flush=True)
+    for name in ("memory.max", "memory.current"):
+        path = Path("/sys/fs/cgroup") / name
+        if path.is_file():
+            print(f"cgroup {name}: {path.read_text().strip()}", flush=True)
+    cv2.setNumThreads(1)
     run = RUNS / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     run.mkdir(parents=True, exist_ok=False)
     print(f"Run: {run}; images: {len(sources)}; checkpoints: {len(checkpoints)}; seed: {SEED}", flush=True)
-    sharpness = []
+    sharpness, reference, summaries = [], [], []
+    write_csv(run / "full_reference.csv", reference, REFERENCE_FIELDS)
+    write_csv(run / "summary.csv", summaries, SUMMARY_FIELDS)
+    write_csv(run / "sharpness.csv", sharpness, SHARPNESS_FIELDS)
     records = prepare_inputs(sources, run, sharpness)
     print(f"Prepared {sum(not record['error'] for record in records)}/{len(records)} model inputs.", flush=True)
+    for checkpoint in checkpoints:
+        model_started = time.perf_counter()
+        rows = infer_model(checkpoint, records, run)
+        reference.extend(rows)
+        write_csv(run / "full_reference.csv", reference, REFERENCE_FIELDS)
+        score_outputs(rows, sharpness)
+        summary = summarize(checkpoint.relative_to(MODELS).as_posix(), rows)
+        summaries.append(summary)
+        write_csv(run / "full_reference.csv", reference, REFERENCE_FIELDS)
+        write_csv(run / "summary.csv", summaries, SUMMARY_FIELDS)
+        write_csv(run / "sharpness.csv", sharpness, SHARPNESS_FIELDS)
+        print(f"Summary {summary['model']}: {summary['n_success']}/{summary['n_expected']} complete scores; "
+              f"{summary['status']}; {time.perf_counter() - model_started:.1f}s", flush=True)
+    print(f"Finished: {run}; total elapsed: {time.perf_counter() - started:.1f}s", flush=True)
+    return 1 if any(summary["n_failed"] for summary in summaries) else 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
 PY

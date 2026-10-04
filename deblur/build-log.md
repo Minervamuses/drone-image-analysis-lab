@@ -7,7 +7,7 @@
 | 階段 | 狀態 | 開始 | 完成 | 證據 | 阻礙 |
 | --- | --- | --- | --- | --- | --- |
 | 01 — 分支與基準回退 | Complete | 2026-10-04 | 2026-10-04 | fix 保存計劃；基準檔案差異為空；回退範圍與保留檔核對通過 | 無 |
-| 02 — 單次實驗腳本 | In progress | 2026-10-04 | — | 已完成入口與單次分組/前處理的語法及 help 檢查 | 模型/全參考 CSV 步驟尚待實作 |
+| 02 — 單次實驗腳本 | Complete | 2026-10-04 | 2026-10-04 | 兩個實作步驟；Bash/Python 語法、help 與差異檢查通過 | 真實推論/度量/CSV 內容留待 lab 驗證 |
 | 03 — lab 執行 | Not started | — | — | — | lab 資料、權重與執行證據尚未取得 |
 
 ## 活動與證據
@@ -46,3 +46,17 @@
 - 檢查：`bash -n lab/run.sh`、既有 `.venv/bin/python` 的 heredoc `ast.parse`、`bash lab/run.sh --help`（無資料/權重仍正常顯示）、`git diff --check` 均退出 0；已閱讀 diff，沒有其他正式程式變更。
 - 編輯工具第一次拒絕同一路徑的 delete/add patch（未更動檔案）；改用單一 update patch 後成功，非模型或程式檢查失敗。
 - Commit 主旨：`feat: prepare evenly assigned deblur inputs`。模型載入、推論、保存/度量與三份最終 CSV 尚未驗證。
+
+### 2026-10-04 — Phase 02 / 步驟 3–5：模型與原始成績表
+
+- 前處理提交為 `de2a80b`，提交後工作區乾淨。再次唯讀確認 repo、WSL Git/Python、Git 狀態與當前入口後，繼續同一正式程式檔；未改套件、共用模組或測試。
+- 遞迴排序 `models/deblur/` 的 .pth/.pt/.ckpt/.safetensors；逐 checkpoint 使用既有 `load_model(..., role="deblur")`/`upscale` 處理完全相同的 records 與已保存輸入。沿用既有尺寸/tiling 行為，確認輸出等於输入形狀，沒有自動縮圖或裁切。
+- checkpoint 相對路徑含副檔名成為輸出模型目錄，圖片原名稱含副檔名再加 `.png`；每次新建帶微秒的 UTC 目錄且禁止覆蓋既有 run。輸入、原圖、權重與歷史結果不改寫。
+- 執行前確認既有依賴、CUDA、Torch AlexNet cache 與 lpips 套件內 v0.1/Alex 校準權重；缺失明確退出。下載函式在本入口禁用，不自動安裝或 CPU 推論。裝置、VRAM、RAM/cgroup 與實際圖片尺寸/時間只在 lab 執行時顯示。
+- 每個模型先保存所有輸出、釋放 deblur 模型/tensor，再建立既有 `PerceptualMetric(cuda:0)`。重讀實際保存的 PNG 與 `read_image` 解碼的原圖，完整尺寸計算 CPU float64 RGB PSNR/SSIM 與 GPU LPIPS；RGB 值 round 到既有 [0,255] 約定。
+- `full_reference.csv` 保留每圖/模型對應、前處理/載入/推論/度量失敗與已取得的局部分數；各項全參考度量獨立記錯，後续模型仍處理。`summary.csv` 以三項皆取得的共同成功列作每模型算術平均，明列 expected/success/failed；只要有失敗即 partial，零成功均值留空。有效 PSNR=inf 與其平均保留，另有 psnr_inf_count。
+- `sharpness.csv` 只有欄位與原始資料；GT 一次、model output 各一次；保留 CPBD 無邊緣時的原值與 invalid/reason，其餘缺值不補零；不呼叫比較/分析/摘要函式，也不影響有效全參考成績。不存在的輸出以 failed 列保留原因。
+- 腳本只寫三份成績 CSV，保存中間輸入和輸出 PNG；每模型完成更新三表，已記錄失敗不清空其他模型结果。任一全參考失敗時最後退出 1；有完整成功結果則依資料呈現，不自動排名或宣稱改善。
+- 檢查：`bash -n lab/run.sh`、heredoc `ast.parse`、`bash lab/run.sh --help`、`git diff --check` 均通過；已閱讀模型、配對、均值與 CSV 的 diff。差異閱讀發現零成功摘要亦應 partial，提交前已修正並重跑 AST/Bash 語法與 diff check（均退出 0），沒有程式檢查失敗。
+- 唯一正式程式修改仍是 `lab/run.sh`，另更新本 log。沒有新增框架、context/review 文件、下載、安裝、GPU/mock 或全套測試；本機沒有實際圖片/模型輸出/成績 CSV，不能宣稱實驗完成。
+- Commit 主旨：`feat: run one minimal deblur experiment with raw metric tables`。第二階段只達到計劃的本機程式交付門檻；真實 checkpoint 相容性、尺寸、OOM、LPIPS cache 可用性及實際成績尚未驗證。
