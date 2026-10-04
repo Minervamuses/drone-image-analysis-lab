@@ -127,3 +127,8 @@
 - lab 同步含 `5e78419` 的 fix 後，由使用者於 repository root 執行一次 `bash lab/run.sh`。預期 stdout 有 NAFNet 的 SKIP/使用者授權理由，已知 checkpoint 集合下實際處理 Uformer/FFTformer/MPRNet/Restormer 四個模型；每張仍只分配一組且保持原尺寸。正常情況 full_reference/summary/sharpness 列數為 4N/4/5N；失敗仍依既有約定保留。
 - 保留正式執行的 Git SHA、console/新 run 與三 CSV/代表圖供驗收；短試跑 4 張不能作正式全量。四模型成本約 7.72 分/張只作同條件粗估，N 與長跑資源仍待 lab 確認。本機無資料/權重或 lab 執行管道，未代跑 GPU。
 - 本步只更新 PLANS 與 log，文件差異檢查通過，commit 主旨 `docs: hand off four-model full lab run`。Phase 03 保持 In progress；本機程式與交接準備完成，按 PLANS 的缺 lab 管道停止界線等待正式結果，不追加 NAFNet 診斷或其他工作。
+
+### 2026-10-04 — fix 推送確認
+
+- 依使用者既有 push 授權，在 WSL 唯讀確認 repo/Git/Python、fix@`6b97759`、乾淨工作區與遠端舊提交為本地 HEAD 的祖先後，執行 `git push origin fix`，退出 0；遠端 fix 由 `fb33d1a` fast-forward 至 `6b977593ec9dd8377f4d720ade8cdd59925d36ab`。`git ls-remote --heads origin refs/heads/fix` 與本地 HEAD 完全相同，提交已含授權跳過、入口排除與全量交接。
+- GitHub 提示舊 `Minervamuses/test.git` 已移往 `Minervamuses/drone-image-analysis-lab.git`；本次推送成功，未更改 remote 設定、main 或 upstream。此段只保存已完成的 push 證據，文件差異檢查後立即提交（主旨 `docs: record pushed NAFNet skip delivery`），再同步該紀錄；最終 SHA 由 Git 查核，不為記錄自身 SHA 反覆提交。
