@@ -8,7 +8,7 @@
 | --- | --- | --- | --- | --- | --- |
 | 01 — 分支與基準回退 | Complete | 2026-10-04 | 2026-10-04 | fix 保存計劃；基準檔案差異為空；回退範圍與保留檔核對通過 | 無 |
 | 02 — 單次實驗腳本 | Complete | 2026-10-04 | 2026-10-04 | 兩個實作步驟；Bash/Python 語法、help 與差異檢查通過 | 真實推論/度量/CSV 內容留待 lab 驗證 |
-| 03 — lab 執行 | In progress | 2026-10-04 | — | 已有四張短試跑/console；NAFNet 兩圖異常；使用者明確授權跳過並繼續 | 待入口排除 NAFNet、其餘代表圖核對與 lab 正式全量結果 |
+| 03 — lab 執行 | In progress | 2026-10-04 | — | 四張短試跑/console；NAFNet 異常與授權跳過已記錄；入口排除已實作 | 待其餘代表圖核對、lab 同步與正式全量結果 |
 
 ## 活動與證據
 
@@ -109,3 +109,11 @@
 - 原短試跑扣除 NAFNet 循環後約 `1851.8s/4 張`，約 7.72 分/張；僅為同條件四模型粗略參考，未啟動全量或承諾總耗時。全量實驗仍由使用者在 lab 執行，Phase 03 保持 In progress。
 - 首次文件 patch 的 context 比對行不完整而被拒絕；隨後唯讀確認工作區仍乾淨，補正為完整原行後重套，沒有半套檔案修改或模型執行失敗。
 - 本步僅更新五份既存 deblur 文件，差異閱讀及 `git diff --check` 通過；不跑模型或程式測試。Commit 主旨 `docs: authorize skipping NAFNet and continue lab plan`。入口排除與其餘代表圖目視留待下一步。
+
+### 2026-10-04 — Phase 03：入口跳過已授權排除的 NAFNet
+
+- 計劃授權提交為 `ed5f75b`；修改前再次唯讀確認同一 WSL repo、`/usr/bin/git`、Python 3.12.3、fix 與乾淨工作區，以及當前 help/checkpoint 收集程式。
+- 正式程式只改 `lab/run.sh`：排序收集 checkpoint 後，對檔名 `NAFNet-GoPro-width64.pth`（含子目錄）印出 SKIP、已知內容異常與 2026-10-04 使用者授權，再將它從實際執行清單排除。help 同步說明例外；若排除後沒有可執行 checkpoint，明確退出，不能產生零模型成功假象。
+- 其餘 checkpoint 的相對路徑順序、四組分配、原尺寸、推論/度量與三 CSV 格式照常。新 run 的 checkpoint 計數只含參與模型，沒有 NAFNet 新成績列；原始五模型短試跑、權重及資料沒有改寫/搬移/刪除。没有精度修正、共用模組/依賴/公共選模介面變更。
+- 最小檢查：`bash -n lab/run.sh`、嵌入 Python 的 `ast.parse`、`bash lab/run.sh --help` 與 `git diff --check` 通過，閱讀 diff 確認排除在 ML import/推論之前。未跑模型、mock、完整測試或重算指標；本機沒有 checkpoint，實際 SKIP console 與四模型全量仍待 lab 確認。
+- 本步提交入口與 log，commit 主旨 `fix: skip user-excluded NAFNet checkpoint`。依計劃下一步只查看其餘模型既存代表圖，之後交付四模型全量命令；不再診斷 NAFNet。

@@ -55,10 +55,11 @@ SUMMARY_FIELDS = (
 def parse_args():
     parser = argparse.ArgumentParser(
         prog="bash lab/run.sh",
-        description="Assign each original-size image to one of four groups; run every deblur checkpoint.",
+        description="Assign each original-size image to one of four groups; run all non-excluded deblur checkpoints.",
         epilog=(
             "Prepare PNG/JPG/JPEG files in evaluation/data/input/ (first level), "
             "checkpoints in models/deblur/ (recursive), and existing project/evaluation dependencies. "
+            "NAFNet-GoPro-width64.pth is skipped due to corrupted outputs, as authorized by the user. "
             "LPIPS requires the AlexNet cache at TORCH_HOME/hub/checkpoints/"
             "alexnet-owt-7be5be79.pth (default TORCH_HOME: models/torch-cache). "
             "No automatic installation, download, resizing, or CPU inference. "
@@ -291,10 +292,18 @@ def main():
     checkpoints = sorted((path for path in MODELS.rglob("*")
                           if path.is_file() and path.suffix.lower() in {".pth", ".pt", ".ckpt", ".safetensors"}),
                          key=lambda path: path.relative_to(MODELS).as_posix())
+    # The user authorized skipping this checkpoint after visible color/checkerboard artifacts.
+    excluded_checkpoint = "NAFNet-GoPro-width64.pth"
+    for checkpoint in checkpoints:
+        if checkpoint.name == excluded_checkpoint:
+            print(f"SKIP {checkpoint.relative_to(MODELS).as_posix()}: known corrupted output; "
+                  "user authorized skipping NAFNet on 2026-10-04", flush=True)
+    checkpoints = [path for path in checkpoints if path.name != excluded_checkpoint]
     if not sources:
         raise SystemExit(f"error: no PNG/JPG/JPEG inputs in {INPUT}; prepare the lab data, no download attempted.")
     if not checkpoints:
-        raise SystemExit(f"error: no deblur checkpoints in {MODELS}; prepare the lab weights, no download attempted.")
+        raise SystemExit(f"error: no runnable deblur checkpoints in {MODELS} after the authorized NAFNet exclusion; "
+                         "prepare the lab weights, no download attempted.")
     global np, cv2, torch, read_image, write_png, measure_tensor, load_model, upscale, psnr, ssim, PerceptualMetric
     sys.path[:0] = [str(ROOT / "src"), str(ROOT / "evaluation")]
     try:
