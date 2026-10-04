@@ -8,7 +8,7 @@
 | --- | --- | --- | --- | --- | --- |
 | 01 — 分支與基準回退 | Complete | 2026-10-04 | 2026-10-04 | fix 保存計劃；基準檔案差異為空；回退範圍與保留檔核對通過 | 無 |
 | 02 — 單次實驗腳本 | Complete | 2026-10-04 | 2026-10-04 | 兩個實作步驟；Bash/Python 語法、help 與差異檢查通過 | 真實推論/度量/CSV 內容留待 lab 驗證 |
-| 03 — lab 執行 | In progress | 2026-10-04 | — | 四張短試跑/console；NAFNet 異常與授權跳過已記錄；入口排除已實作 | 待其餘代表圖核對、lab 同步與正式全量結果 |
+| 03 — lab 執行 | In progress | 2026-10-04 | — | 四張短試跑/console/其餘模型代表圖已核對；NAFNet 異常與授權跳過已記錄；入口排除已實作 | 待 lab 同步與四模型正式全量結果 |
 
 ## 活動與證據
 
@@ -117,3 +117,13 @@
 - 其餘 checkpoint 的相對路徑順序、四組分配、原尺寸、推論/度量與三 CSV 格式照常。新 run 的 checkpoint 計數只含參與模型，沒有 NAFNet 新成績列；原始五模型短試跑、權重及資料沒有改寫/搬移/刪除。没有精度修正、共用模組/依賴/公共選模介面變更。
 - 最小檢查：`bash -n lab/run.sh`、嵌入 Python 的 `ast.parse`、`bash lab/run.sh --help` 與 `git diff --check` 通過，閱讀 diff 確認排除在 ML import/推論之前。未跑模型、mock、完整測試或重算指標；本機沒有 checkpoint，實際 SKIP console 與四模型全量仍待 lab 確認。
 - 本步提交入口與 log，commit 主旨 `fix: skip user-excluded NAFNet checkpoint`。依計劃下一步只查看其餘模型既存代表圖，之後交付四模型全量命令；不再診斷 NAFNet。
+
+### 2026-10-04 — Phase 03：其餘代表圖與四模型全量交接
+
+- 入口提交為 `5e78419`；本步唯讀確認同一 WSL repo/Git/Python、fix 與乾淨工作區，核對待看三張既存輸出存在。沒有新的推論、度量、下載或完整測試。
+- 補看原 run 的 FFTformer、MPRNet、Restormer 各 `0881.JPG.png`，並對照 inputs/0881；三張皆可解碼且保留海面/船隻結構，未見黑圖或 NAFNet 的大片彩色方塊遮蔽。FFTformer 有局部橙/紫色斑，保留為模型效果觀察，不宣稱畫質改善或完全無偽影，也不自動排除。預覽工具將全圖縮為 1824×1366，沒有逐像素/全量目視。
+- 合併先前 Uformer/0881 的目視、三 CSV 關聯/平均與 24 PNG 表頭確認，完成計劃的少量代表圖核對；NAFNet 已由使用者明確授權跳過，其根因未知不再阻擋其餘四模型正式實驗。原本五模型 run 與全部成績原樣保留。
+- 明確記錄本聊天先前使用者「幫我push」授權，PLANS 同步限定本次 `origin/fix` 的正常推送；修改前 `git ls-remote --heads origin refs/heads/fix` 為 `fb33d1a6fcdd0594e50f9d1b85c22cb6a32e0bee`，未觀察到別人更新。此文件提交後再推送並以 remote ref 核對；提交當下尚不把待執行 push 寫成成功。
+- lab 同步含 `5e78419` 的 fix 後，由使用者於 repository root 執行一次 `bash lab/run.sh`。預期 stdout 有 NAFNet 的 SKIP/使用者授權理由，已知 checkpoint 集合下實際處理 Uformer/FFTformer/MPRNet/Restormer 四個模型；每張仍只分配一組且保持原尺寸。正常情況 full_reference/summary/sharpness 列數為 4N/4/5N；失敗仍依既有約定保留。
+- 保留正式執行的 Git SHA、console/新 run 與三 CSV/代表圖供驗收；短試跑 4 張不能作正式全量。四模型成本約 7.72 分/張只作同條件粗估，N 與長跑資源仍待 lab 確認。本機無資料/權重或 lab 執行管道，未代跑 GPU。
+- 本步只更新 PLANS 與 log，文件差異檢查通過，commit 主旨 `docs: hand off four-model full lab run`。Phase 03 保持 In progress；本機程式與交接準備完成，按 PLANS 的缺 lab 管道停止界線等待正式結果，不追加 NAFNet 診斷或其他工作。
