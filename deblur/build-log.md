@@ -8,7 +8,7 @@
 | --- | --- | --- | --- | --- | --- |
 | 01 — 分支與基準回退 | Complete | 2026-10-04 | 2026-10-04 | fix 保存計劃；基準檔案差異為空；回退範圍與保留檔核對通過 | 無 |
 | 02 — 單次實驗腳本 | Complete | 2026-10-04 | 2026-10-04 | 兩個實作步驟；Bash/Python 語法、help 與差異檢查通過 | 真實推論/度量/CSV 內容留待 lab 驗證 |
-| 03 — lab 執行 | Not started | — | — | — | lab 資料、權重與執行證據尚未取得 |
+| 03 — lab 執行 | Blocked | 2026-10-04 | — | 已讀 phase-03 並確認本機指定資料/權重為空；待使用者在 lab 執行 | 尚無 lab 執行管道與真實輸出證據 |
 
 ## 活動與證據
 
@@ -60,3 +60,14 @@
 - 檢查：`bash -n lab/run.sh`、heredoc `ast.parse`、`bash lab/run.sh --help`、`git diff --check` 均通過；已閱讀模型、配對、均值與 CSV 的 diff。差異閱讀發現零成功摘要亦應 partial，提交前已修正並重跑 AST/Bash 語法與 diff check（均退出 0），沒有程式檢查失敗。
 - 唯一正式程式修改仍是 `lab/run.sh`，另更新本 log。沒有新增框架、context/review 文件、下載、安裝、GPU/mock 或全套測試；本機沒有實際圖片/模型輸出/成績 CSV，不能宣稱實驗完成。
 - Commit 主旨：`feat: run one minimal deblur experiment with raw metric tables`。第二階段只達到計劃的本機程式交付門檻；真實 checkpoint 相容性、尺寸、OOM、LPIPS cache 可用性及實際成績尚未驗證。
+
+### 2026-10-04 — Phase 03：等待 lab，停止於計劃交付界線
+
+- 第二階段最終程式提交為 `e111517`，提交後 fix 工作區乾淨。依依賴順序讀 phase-03；本階段沒有實際啟動 lab 短試跑或正式實驗。
+- 再次唯讀確認 WSL repo、Git/Python、Git 狀態/提交及當前輸入/模型檔案；`find evaluation/data/input models/deblur -type f` 只有輸入 `.gitignore`，即本機指定資料 0 張、deblur checkpoint 0 個。本次沒有使用者提供的 lab 執行管道，不以其他本機資料或權重替代。
+- `git rev-parse main` 仍為 `33b396019a9294efbda02a440d9a3b68eac69568`。五個指定保留資料路徑相對 33b3960 的差異為空；src、全參考/清晰度共用程式、CPBD 授權、AGENTS.md 與 manifests 相對 8766f1d 的差異亦為空。
+- lab 同步本次已提交程式、準備既有 venv/資料/checkpoint/LPIPS cache 後，於 repository root 先執行 `bash lab/run.sh --limit 4`。此命令尚未實測；保留 console 的 run 路徑、裝置/資源、圖尺寸、耗時及失敗原因，核對三 CSV 與少量原尺寸實際圖片。
+- 一輪短試跑的資源/成本、CSV 關聯與代表输出確認後，由使用者執行一次 `bash lab/run.sh`。全量命令尚未實測；圖數、checkpoint 數、lab GPU/VRAM/RAM/磁碟、套件/cache 與總耗時未知，未替使用者估算或代跑。
+- 待取得 lab 證據後再追加短試跑/正式結果並依 phase-03 提交；不把語法/help 通過、退出碼或本機程式交付當成實驗完成。本階段保留 Blocked，沒有有效模型結果可供分析。
+- 本機交付完成，按 PLANS 的缺資料/server 停止界線停下；沒有 push/遠端寫入、下載、安裝、額外測試或 GPU 工作。
+- Commit 主旨：`docs: record pending lab deblur execution`。本次結論為「程式已交付、實驗待跑」。
