@@ -8,7 +8,7 @@
 | --- | --- | --- | --- | --- | --- |
 | 01 — 分支與基準回退 | Complete | 2026-10-04 | 2026-10-04 | fix 保存計劃；基準檔案差異為空；回退範圍與保留檔核對通過 | 無 |
 | 02 — 單次實驗腳本 | Complete | 2026-10-04 | 2026-10-04 | 兩個實作步驟；Bash/Python 語法、help 與差異檢查通過 | 真實推論/度量/CSV 內容留待 lab 驗證 |
-| 03 — lab 執行 | In progress | 2026-10-04 | — | --limit 4：4 圖×5 模型；CSV 關聯/平均核對通過；A6000/torch 2.11.0+cu128；2096.7s；NAFNet 兩圖目視異常 | NAFNet 異常原因、lab 執行提交與正式全量結果待確認 |
+| 03 — lab 執行 | In progress | 2026-10-04 | — | 已有四張短試跑/console；NAFNet 兩圖異常；使用者明確授權跳過並繼續 | 待入口排除 NAFNet、其餘代表圖核對與 lab 正式全量結果 |
 
 ## 活動與證據
 
@@ -100,3 +100,12 @@
 - 下一步限定已異常的 `0881.JPG.png`、同一 NAFNet checkpoint、現有 loader/upscale/原尺寸 tiling，比較現行 cuDNN 卷積精度與 IEEE FP32。只準備供使用者在 lab 執行的命令；不改正式程式、公共介面、共用推論、依賴或分組/成績定義，不產生新測試框架，不自行跑 GPU。命令記錄 Git SHA/Spandrel 版本/實際精度並保存兩張 PNG 到新的診斷目錄；原 run 不修改。
 - 此定位命令尚未在 lab 執行；以 NAFNet 四張含度量平均 `61.225s/張` 作成本參考，兩次單圖推論的 IEEE 耗時尚未知，不保證兩分鐘內完成。若現行精度已為 IEEE，命令在推論前停止，不做相同條件的重複工作。
 - 本步只改 `deblur/build-log.md` 與 `deblur/context/phase-03-context.md`；文件差異檢查與 context 命令的 Bash/heredoc Python 語法检查通過，沒有模型、完整測試或全量執行。Commit 主旨 `docs: record lab console and focused NAFNet diagnosis`。Phase 03 保留 In progress；NAFNet 內容異常、lab 執行 SHA 與正式全量結果仍未驗證。
+
+### 2026-10-04 — Phase 03：記錄使用者授權跳過 NAFNet
+
+- 使用者明確要求：「我插入一下，跳過NAFNet不管，這邊就備註有問題以及我授權跳過，繼續」。本次授權覆蓋原本全部 checkpoint 的 NAFNet 例外；後續跳過已知 `NAFNet-GoPro-width64.pth`（同檔名含子目錄），取消尚未執行的精度對照/根因定位，其餘模型繼續。不是模型自動淘汰或宣稱 NAFNet 修復。
+- 修改前唯讀确认同一 WSL repo、Linux Git/現有 Python/pip、fix@`6a3ef25` 與乾淨工作區；重新讀 AGENTS、GOALS、PLANS、build-log、phase-03 與相關 context。沒有其他 AGENTS/code_review，指定本機資料/checkpoint 仍缺，未跑 GPU。
+- 先更新 GOALS 的使用者授權例外、PLANS 的後續順序、phase-03 的四模型全量驗收與 context 的取消註記，再進行入口修改。原始 `20261004T124643.486598Z` 的圖片/三 CSV 及歷史失敗紀錄保留原樣，未刪模型權重。
+- 原短試跑扣除 NAFNet 循環後約 `1851.8s/4 張`，約 7.72 分/張；僅為同條件四模型粗略參考，未啟動全量或承諾總耗時。全量實驗仍由使用者在 lab 執行，Phase 03 保持 In progress。
+- 首次文件 patch 的 context 比對行不完整而被拒絕；隨後唯讀確認工作區仍乾淨，補正為完整原行後重套，沒有半套檔案修改或模型執行失敗。
+- 本步僅更新五份既存 deblur 文件，差異閱讀及 `git diff --check` 通過；不跑模型或程式測試。Commit 主旨 `docs: authorize skipping NAFNet and continue lab plan`。入口排除與其餘代表圖目視留待下一步。

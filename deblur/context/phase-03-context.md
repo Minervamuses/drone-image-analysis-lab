@@ -2,6 +2,8 @@
 
 2026-10-04，使用者確認 `20261004T124643.486598Z` 是 `--limit 4` 短試跑。來源為 `/mnt/c/Users/garyc/Downloads/20261004T124643.486598Z/`，CSV 與圖片保持原樣；完整核對證據見 ../build-log.md。
 
+**目前決策（2026-10-04）：使用者明確授權跳過 NAFNet 並繼續。** 已知輸出異常仍未修復，原始圖片/成績與下述確認事實保留；後續執行排除 `NAFNet-GoPro-width64.pth`，不再追查根因。NAFNet 精度對照提案已取消，不是全量前置條件；下面的命令只留作歷史提案，不執行。
+
 ## 會影響下一步的確認事實
 
 - 三份 CSV 的 4 圖×5 模型關聯、樣本數與逐圖平均一致，24 張 PNG 表頭均為 RGB 5280×3956。
@@ -14,9 +16,9 @@
 
 既有程式採 float32、支援 tiling 時使用 512 core/32 halo；入口未明確控制 TF32，而 `33b3960:lab/run.sh` 曾關閉 matmul/cuDNN TF32。[PyTorch numerical accuracy](https://docs.pytorch.org/docs/main/notes/numerical_accuracy.html#tensorfloat-32-tf32-on-nvidia-ampere-and-later-devices) 說明 float32 卷積仍可使用 TF32；[CUDA semantics](https://docs.pytorch.org/docs/main/notes/cuda.html#tensorfloat-32-tf32-on-ampere-and-later-devices) 提供 torch 2.9 之後的 `fp32_precision` 控制，且不建議混用新舊控制方式。console 未印實際旗標；以上只能支持一個精度對照，不證實異常根因，也不排除 checkpoint/模型的問題。
 
-下一步只針對已異常的 none/0881 做下列對照，再判斷是否需要修改入口；不疊加 tiling、模型實作或依賴修正。原 run 與成績保持原樣，不把短試跑寫成驗收通過，也不自行啟動全量。若需要共用推論、依賴、縮圖裁切或代跑 GPU，沿用 PLANS 的授權/成本界線。現有 phase-03 的「無阻礙後才全量」仍適用，無需改變實驗定義。
+先前提出的 none/0881 精度對照尚未執行，現已依使用者授權取消。下一步依更新的 PLANS/phase-03，在入口實作跳過並補看其餘模型的既存代表圖，再交由使用者執行四模型正式全量。原 run 與成績保持原樣；新的模型排除由使用者明確決定，不能宣稱 NAFNet 已修復。代跑 GPU 仍沿用 PLANS 的成本/授權界線。
 
-## lab 單圖精度對照（尚未執行）
+## 歷史提案：lab 單圖精度對照（已取消，不執行）
 
 在 `/home/gary/test` 的 Linux shell 執行下列命令。只用已保存的 0881 輸入與現有 NAFNet 權重，兩次推論保持 loader、張量 dtype、尺寸及 tiling 相同，只改 cuDNN 卷積精度。預期產物為新 `evaluation/runs/nafnet_precision_<UTC>/` 的兩張 PNG 與 stdout；不跑 LPIPS/清晰度或其他模型，不改正式 run 的三份 CSV。
 
