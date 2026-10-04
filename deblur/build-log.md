@@ -8,7 +8,7 @@
 | --- | --- | --- | --- | --- | --- |
 | 01 — 分支與基準回退 | Complete | 2026-10-04 | 2026-10-04 | fix 保存計劃；基準檔案差異為空；回退範圍與保留檔核對通過 | 無 |
 | 02 — 單次實驗腳本 | Complete | 2026-10-04 | 2026-10-04 | 兩個實作步驟；Bash/Python 語法、help 與差異檢查通過 | 真實推論/度量/CSV 內容留待 lab 驗證 |
-| 03 — lab 執行 | In progress | 2026-10-04 | — | 已收到 --limit 4：4 圖×5 模型；CSV 關聯/平均核對通過；NAFNet 兩圖目視異常 | NAFNet 異常原因、lab console/環境/耗時與正式全量結果待確認 |
+| 03 — lab 執行 | In progress | 2026-10-04 | — | --limit 4：4 圖×5 模型；CSV 關聯/平均核對通過；A6000/torch 2.11.0+cu128；2096.7s；NAFNet 兩圖目視異常 | NAFNet 異常原因、lab 執行提交與正式全量結果待確認 |
 
 ## 活動與證據
 
@@ -86,3 +86,17 @@
 - 唯讀追查現有 `inference.py`/`tiling.py` 與已安裝 Spandrel NAFNet：共用 loader 使用 float32，支援 tiling 時沿用 512 core/32 halo；此入口沒有明確設定 TF32。這些是現有程式事實，尚不能確定異常來自 tiling、GPU 數值或 checkpoint；沒有用推測做程式修正。影響下一步的事實見 `context/phase-03-context.md`。
 - 驗證僅使用 CSV 核對、PNG 表頭/檔案關聯與上述代表圖目視；沒有回算全部指標、跑完整測試或新增驗證框架。原始 JPG 不在回傳資料且 lab 路徑本機不可用，無法獨立核對 GT 雜湊、blur 合成或重新計算 GT 全參考成績。
 - 本次只提交 log 與影響後續執行的 context，commit 主旨 `docs: record bounded lab deblur run`。短試跑已取得真實證據；全量尚未執行，NAFNet 異常與 lab 成本/環境待查，Phase 03 保留 In progress，未宣稱整體實驗完成。
+
+### 2026-10-04 — Phase 03：補入 lab console 與下一個定位步驟
+
+- 使用者貼回同一 run 的 console，命令為 `/home/gary/test` 下的 `bash lab/run.sh --limit 4`。run 路徑、4 張 5280×3956 圖、seed=923、四組分配與 5 個 checkpoint 均吻合已回傳 CSV；此為使用者提供的 console 證據，未新增或假稱存在 console 檔案。
+- 再次唯讀確認 WSL repo、`/usr/bin/git`、現有 Python 3.12.3、fix@`0605f42` 與乾淨工作區；重讀適用 AGENTS、GOALS、PLANS、phase-03、log/context、當前入口及相關載入/tiling/NAFNet 程式。本機指定輸入仍只有 `.gitignore`，沒有 deblur checkpoint；未執行模型。
+- lab 確認為 torch `2.11.0+cu128`、CUDA runtime `12.8`、NVIDIA RTX A6000、`CUDA_VISIBLE_DEVICES=0`；啟動時 VRAM free/total = `45366444032/50899386368` bytes（約 42.25/47.40 GiB）。這是 lab 裝置，並非本機筆電 GPU；啟動值不是峰值量測。
+- Console 原始 RAM 資訊：MemTotal `396091568 kB`、MemFree `41278028 kB`、MemAvailable `323821248 kB`；cgroup memory.max `64424509440`、memory.current `62796476416` bytes。cgroup 上限 60 GiB，current 約 58.48 GiB，上限與 current 當下差約 1.52 GiB；host MemAvailable 不能當容器可用量，current 也不是此程式獨占用量，不能由此推定 OOM。
+- PSNR/SSIM 在 CPU float64，LPIPS 在 cuda:0，使用既有 `/home/gary/test/models/torch-cache/hub/checkpoints/alexnet-owt-7be5be79.pth` 與 lpips v0.1/Alex 校準權重。每模型 4/4 saved、4/4 complete scores；console 沒有載入、推論、度量或 OOM 錯誤。torchvision pretrained/weights 與 torch.meshgrid indexing 提示是棄用警告，沒有證據把它們當作彩色方塊原因，未升級依賴。
+- 各模型架構／模型循環耗時：NAFNet `244.9s`、Uformer `335.3s`、FFTformer `571.1s`、MPRNet（model_deblurring.pth）`346.8s`、Restormer（motion_deblurring.pth）`448.3s`。總耗時 `2096.7s`，約 34 分 57 秒；各模型時間包含推論、保存與度量，不能當成純推論 profiling。
+- 五模型循環合計 `1946.4s`，其餘 `150.3s` 包含啟動/前處理等；同條件全部五模型每張約 `524.175s`（8.74 分），只能作粗略外推，正式 N 尚未知，未估整批總時數、啟動全量或重跑這輪 35 分鐘工作。
+- 唯讀 Git 比較確認被回退的 `33b3960:lab/run.sh` 曾明確關閉 matmul/cuDNN TF32；現入口未設定。PyTorch 官方 numerical_accuracy/CUDA 說明指出 float32 張量不排除 TF32 卷積；但 console 沒印實際精度旗標，這只是候選原因，不是已確認根因。來源連結及固定其他條件的單圖對照命令放入既存 context。
+- 下一步限定已異常的 `0881.JPG.png`、同一 NAFNet checkpoint、現有 loader/upscale/原尺寸 tiling，比較現行 cuDNN 卷積精度與 IEEE FP32。只準備供使用者在 lab 執行的命令；不改正式程式、公共介面、共用推論、依賴或分組/成績定義，不產生新測試框架，不自行跑 GPU。命令記錄 Git SHA/Spandrel 版本/實際精度並保存兩張 PNG 到新的診斷目錄；原 run 不修改。
+- 此定位命令尚未在 lab 執行；以 NAFNet 四張含度量平均 `61.225s/張` 作成本參考，兩次單圖推論的 IEEE 耗時尚未知，不保證兩分鐘內完成。若現行精度已為 IEEE，命令在推論前停止，不做相同條件的重複工作。
+- 本步只改 `deblur/build-log.md` 與 `deblur/context/phase-03-context.md`；文件差異檢查與 context 命令的 Bash/heredoc Python 語法检查通過，沒有模型、完整測試或全量執行。Commit 主旨 `docs: record lab console and focused NAFNet diagnosis`。Phase 03 保留 In progress；NAFNet 內容異常、lab 執行 SHA 與正式全量結果仍未驗證。
