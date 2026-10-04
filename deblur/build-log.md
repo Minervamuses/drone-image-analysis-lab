@@ -8,7 +8,7 @@
 | --- | --- | --- | --- | --- | --- |
 | 01 — 分支與基準回退 | Complete | 2026-10-04 | 2026-10-04 | fix 保存計劃；基準檔案差異為空；回退範圍與保留檔核對通過 | 無 |
 | 02 — 單次實驗腳本 | Complete | 2026-10-04 | 2026-10-04 | 兩個實作步驟；Bash/Python 語法、help 與差異檢查通過 | 真實推論/度量/CSV 內容留待 lab 驗證 |
-| 03 — lab 執行 | Blocked | 2026-10-04 | — | 已讀 phase-03 並確認本機指定資料/權重為空；待使用者在 lab 執行 | 尚無 lab 執行管道與真實輸出證據 |
+| 03 — lab 執行 | In progress | 2026-10-04 | — | 已收到 --limit 4：4 圖×5 模型；CSV 關聯/平均核對通過；NAFNet 兩圖目視異常 | NAFNet 異常原因、lab console/環境/耗時與正式全量結果待確認 |
 
 ## 活動與證據
 
@@ -71,3 +71,18 @@
 - 待取得 lab 證據後再追加短試跑/正式結果並依 phase-03 提交；不把語法/help 通過、退出碼或本機程式交付當成實驗完成。本階段保留 Blocked，沒有有效模型結果可供分析。
 - 本機交付完成，按 PLANS 的缺資料/server 停止界線停下；沒有 push/遠端寫入、下載、安裝、額外測試或 GPU 工作。
 - Commit 主旨：`docs: record pending lab deblur execution`。本次結論為「程式已交付、實驗待跑」。
+
+### 2026-10-04 — Phase 03：收到並核對四張 lab 短試跑
+
+- 使用者提供 `/mnt/c/Users/garyc/Downloads/20261004T124643.486598Z`，並明確確認是 `--limit 4` 短試跑，不是正式全量。run 名稱標示 UTC 2026-10-04 12:46:43.486598，即 Asia/Taipei 20:46:43.486598；CSV 的 lab 原路徑為 `/home/gary/test/evaluation/runs/deblur/20261004T124643.486598Z/`。
+- 續作唯讀確認：同一 WSL repo、Linux Git/Python、fix@`fb33d1a`，工作區乾淨；重新讀 AGENTS、GOALS、PLANS、build-log 與 phase-03。lab 實際 checkout SHA、GPU、VRAM/RAM/磁碟、套件版本與總耗時沒有隨結果回傳，未以檔案時間推估成本或假定硬體。
+- 原始交付只有三份 CSV、4 張 inputs PNG、20 張 outputs PNG；没有原始 JPG、checkpoint 或 console。所有來源只讀，未搬檔、改寫成績、重跑模型或下載。本機 `models/deblur/` 仍無 checkpoint。
+- `full_reference.csv` 20 列、`summary.csv` 5 列、`sharpness.csv` 24 列（4 GT + 20 model_output）；欄位符合 GOALS，沒有說明段落。全參考 20 列與清晰度 24 列皆為 ok，error/invalid_metrics 空白，三項分數及四項指標皆有值；本次無 inf 或失敗列可驗證特殊情況。
+- 四組各一張：0881.JPG=none、0002.JPG=linear、0696.JPG=trajectory、0997.JPG=gaussian；五個模型的 image/condition/blur_params/original_path/input_path 完全相同，各模型恰好 4 個 image，沒有重複 model-image。模型為 NAFNet-GoPro-width64.pth、Uformer_B_GoPro.pth、fftformer_GoPro.pth、model_deblurring.pth、motion_deblurring.pth。
+- 以 WSL 現有 Python 的 csv/標準函式直接核對每模型逐圖算術平均：五個模型的 PSNR/SSIM/LPIPS mean 與 summary 差異皆為 0，分母皆為 4，expected/success/failed 皆 4/4/0。這是短試跑平均，不能代替全量平均。
+- 核對 CSV 路徑映射到回傳 run 後，所有 inputs/outputs 檔案存在；名稱含原副檔名，sharpness 的 model-image/condition/path 與 full_reference 一致，GT 不按模型重複。讀取 24 張 PNG 表頭皆為 RGB、5280×3956。
+- 實際目視：inputs 的 0881.JPG.png（none）與 0696.JPG.png（trajectory），NAFNet 的同兩張輸出，以及 Uformer 的 0881.JPG.png。輸入沒有彩色方塊；NAFNet 兩张輸出有大片規則彩色區塊與棋盤紋，確認是可解碼但明顯異常的內容。已查看的 Uformer 對照圖未見同樣現象，沒有宣稱其餘所有圖片均已目視通過。
+- NAFNet 的 0881.JPG / 0696.JPG PSNR 分別為 8.062397571287418 / 9.114510565912244 dB，輸出 laplacian_variance 分別為 57664.25125337871 / 54295.31281784097。CSV 的 ok 表示輸出及度量取得，不能掩蓋實際內容異常；保留原始列、模型與數值，不自动排除 NAFNet、不改分母或設畫質門檻。
+- 唯讀追查現有 `inference.py`/`tiling.py` 與已安裝 Spandrel NAFNet：共用 loader 使用 float32，支援 tiling 時沿用 512 core/32 halo；此入口沒有明確設定 TF32。這些是現有程式事實，尚不能確定異常來自 tiling、GPU 數值或 checkpoint；沒有用推測做程式修正。影響下一步的事實見 `context/phase-03-context.md`。
+- 驗證僅使用 CSV 核對、PNG 表頭/檔案關聯與上述代表圖目視；沒有回算全部指標、跑完整測試或新增驗證框架。原始 JPG 不在回傳資料且 lab 路徑本機不可用，無法獨立核對 GT 雜湊、blur 合成或重新計算 GT 全參考成績。
+- 本次只提交 log 與影響後續執行的 context，commit 主旨 `docs: record bounded lab deblur run`。短試跑已取得真實證據；全量尚未執行，NAFNet 異常與 lab 成本/環境待查，Phase 03 保留 In progress，未宣稱整體實驗完成。
