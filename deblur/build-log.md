@@ -7,7 +7,7 @@
 | 階段 | 狀態 | 開始 | 完成 | 證據 | 阻礙 |
 | --- | --- | --- | --- | --- | --- |
 | 01 — 分支與基準回退 | Complete | 2026-10-04 | 2026-10-04 | fix 保存計劃；基準檔案差異為空；回退範圍與保留檔核對通過 | 無 |
-| 02 — 單次實驗腳本 | Not started | — | — | — | 無 |
+| 02 — 單次實驗腳本 | In progress | 2026-10-04 | — | 已完成入口與單次分組/前處理的語法及 help 檢查 | 模型/全參考 CSV 步驟尚待實作 |
 | 03 — lab 執行 | Not started | — | — | — | lab 資料、權重與執行證據尚未取得 |
 
 ## 活動與證據
@@ -34,3 +34,15 @@
 - `git diff 8766f1d -- lab/run.sh src evaluation/metrics.py evaluation/perceptual.py evaluation/blur_metrics.py evaluation/LICENSE-CPBD.txt pyproject.toml requirements-wsl.txt` 無差異；共用載入/推論、MPO 修正、全參考/清晰度指標與 CPBD 授權均保留。
 - `git diff --cached --name-status` 僅有五個預定回退檔案；`git diff --cached --check` 通過。此紀錄納入同一回退提交，未跑模型或完整測試。
 - Commit 主旨：`revert: restore pre-expansion baseline and preserve experiment data`。提交後核對分支、乾淨工作區與 git log，再交接 phase-02。
+
+### 2026-10-04 — Phase 02 / 步驟 1–2：入口與前處理
+
+- 第一階段回退提交為 `935b6c0`；提交後 fix、乾淨工作區與三筆 git log 已確認。讀 phase-02，重新確認 WSL repo、Git、Python 與當前 `lab/run.sh` 後才實作。
+- 唯一正式程式修改為 `lab/run.sh`：既有 venv 執行嵌入 Python；只接受 `--limit N`/help；名稱排序後 seed=923 洗牌、limit 後循環分組，每圖只產生一張原尺寸 PNG，保留原副檔名。
+- 重用 `read_image`/`write_png`/`measure_tensor`。sRGB/linear 公式與質心置中的 bilinear rasterization 取材自 Git 中舊入口；固定 8px/45° 直線、90°/8px 圓弧與 σ=2/13×13 Gaussian，反射邊界純模糊，none 不改解碼 RGB；沒有裁切、額外雜訊、反光增强或再壓 JPEG。
+- GT 清晰度每圖一列，保留局部缺值與 CPBD 原值/invalid；前處理錯誤保留原分組與原因。全參考 CSV 與模型循環將在下一個修改步驟完成，此時未宣稱完整入口可跑實驗。
+- 已讀既存相關 `evaluation/context/phase-04-context.md`：沿用 CPU float64 PSNR/SSIM 與完整尺寸 LPIPS 的既有成本限制，不改算法。
+- 本機 `evaluation/data/input/` 只有 `.gitignore`，`models/deblur/` 為空；未下載、未 import ML 套件作驗收、未跑圖片/GPU/mock/全套測試。
+- 檢查：`bash -n lab/run.sh`、既有 `.venv/bin/python` 的 heredoc `ast.parse`、`bash lab/run.sh --help`（無資料/權重仍正常顯示）、`git diff --check` 均退出 0；已閱讀 diff，沒有其他正式程式變更。
+- 編輯工具第一次拒絕同一路徑的 delete/add patch（未更動檔案）；改用單一 update patch 後成功，非模型或程式檢查失敗。
+- Commit 主旨：`feat: prepare evenly assigned deblur inputs`。模型載入、推論、保存/度量與三份最終 CSV 尚未驗證。
