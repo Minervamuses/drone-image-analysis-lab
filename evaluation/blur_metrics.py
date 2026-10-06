@@ -23,6 +23,8 @@ import torch
 from skimage.feature import canny
 from skimage.measure import blur_effect
 
+from metric_defs import BLUR_METRICS, RATIO_METRICS
+
 
 # The CPBD code below (cpbd_score and its helpers) is derived from the CPBD
 # reference software, whose licence (also in LICENSE-CPBD.txt) requires this notice:
@@ -283,10 +285,6 @@ def _check_gray(gray: np.ndarray) -> np.ndarray:
     return gray.astype(np.float64, copy=False)
 
 
-
-BLUR_METRICS = ("laplacian_variance", "tenengrad", "cpbd", "crete_roffet_blur")
-
-
 def _measurement(value, *, status="valid", reason=None, debug=None) -> dict:
     return {
         "value": value,
@@ -360,7 +358,7 @@ def compare_measurements(before: dict, after: dict, *, applicable: bool = True) 
     """Compute each image's ratio or delta without substituting a zero baseline."""
     changes = {}
     for name in BLUR_METRICS:
-        kind = "ratio" if name in ("laplacian_variance", "tenengrad") else "delta"
+        kind = "ratio" if name in RATIO_METRICS else "delta"
         change = {"value": None, "valid": False, "status": "unmeasurable",
                   "reason": None, "kind": kind}
         changes[name] = change

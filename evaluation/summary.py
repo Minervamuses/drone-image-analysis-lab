@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from itertools import combinations
 from statistics import median
 
+from metric_defs import BLUR_METRICS, RATIO_METRICS
+
 METRIC_NAMES = ("PSNR", "SSIM", "LPIPS")
 # LPIPS is a distance: lower is more similar. The other two are fidelity scores.
 HIGHER_IS_BETTER = {"PSNR": True, "SSIM": True, "LPIPS": False}
@@ -89,9 +91,6 @@ def summarise(results, failures) -> Summary:
 
 
 # These summaries deliberately remain separate from the legacy reference scores.
-BLUR_METRICS = ("laplacian_variance", "tenengrad", "cpbd", "crete_roffet_blur")
-
-
 def mode_change(row: dict, name: str, order) -> dict:
     """Read one recorded change without inventing missing measurements."""
     if list(order) != ["deblur"]:
@@ -128,7 +127,7 @@ def summarise_mode(combo: dict) -> dict:
         changes = [(row, mode_change(row, name, combo["order"])) for row in rows]
         valid = [(row, record["value"]) for row, record in changes if record.get("valid")]
         values = [value for _, value in valid]
-        kind = "ratio" if name in ("laplacian_variance", "tenengrad") else "delta"
+        kind = "ratio" if name in RATIO_METRICS else "delta"
         neutral = 1.0 if kind == "ratio" else 0.0
         higher = name != "crete_roffet_blur"
         improved = sum(value > neutral if higher else value < neutral for value in values)

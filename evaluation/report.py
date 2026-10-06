@@ -6,7 +6,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from summary import (BLUR_METRICS, HIGHER_IS_BETTER, decide_winner, mode_change,
+from metric_defs import BLUR_METRICS, RATIO_METRICS
+from summary import (HIGHER_IS_BETTER, decide_winner, mode_change,
                      summarise_mode, summarise_mode_comparisons)
 
 REQUIRED_HEADER_FIELDS = (
@@ -482,7 +483,7 @@ def write_mode_reports(run_dir: Path, environment: dict, combinations: list[dict
                 before = _mode_record(row, "before", metric)
                 after = _mode_record(row, "after", metric)
                 change = mode_change(row, metric, combo["order"])
-                kind = "ratio" if metric in ("laplacian_variance", "tenengrad") else "delta"
+                kind = "ratio" if metric in RATIO_METRICS else "delta"
                 debug = {"before": before.get("debug", {}), "after": after.get("debug", {}), "change": change.get("debug", {})}
                 detail.append(f"| {metric} | {_mode_number(before.get('value'))} | {_mode_validity(before)} "
                               f"| {_mode_number(after.get('value'))} | {_mode_validity(after)} "

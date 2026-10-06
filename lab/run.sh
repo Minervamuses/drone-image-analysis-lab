@@ -27,6 +27,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(os.environ["DEBLUR_REPO_ROOT"])
+sys.path[:0] = [str(ROOT / "src"), str(ROOT / "evaluation")]
+from metric_defs import BLUR_METRICS as SHARPNESS_METRICS
+
 INPUT = ROOT / "evaluation/data/input"
 MODELS = ROOT / "models/deblur"
 RUNS = ROOT / "evaluation/runs/deblur"
@@ -37,7 +40,6 @@ CONDITIONS = {
     "trajectory": {"arc_deg": 90, "max_xy_span_px": 8},
     "gaussian": {"sigma_px": 2, "kernel_size": 13},
 }
-SHARPNESS_METRICS = ("laplacian_variance", "tenengrad", "cpbd", "crete_roffet_blur")
 SHARPNESS_FIELDS = (
     "image", "kind", "model", "condition", "path", *SHARPNESS_METRICS,
     "status", "invalid_metrics", "error",
@@ -306,7 +308,6 @@ def main():
         raise SystemExit(f"error: no runnable deblur checkpoints in {MODELS} after the authorized NAFNet exclusion; "
                          "prepare the lab weights, no download attempted.")
     global np, cv2, torch, read_image, unique_output_path, write_png, measure_tensor, load_model, upscale, psnr, ssim, PerceptualMetric
-    sys.path[:0] = [str(ROOT / "src"), str(ROOT / "evaluation")]
     try:
         import numpy as np
         import cv2
