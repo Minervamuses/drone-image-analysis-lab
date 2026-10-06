@@ -1,95 +1,64 @@
-# Drone Image Super-Resolution
+# Drone SR / Deblur Lab
 
+使用預訓練 Spandrel 模型批次處理圖片，保留原始圖片。實際處理與評估共用 `src/drone_sr/` 的讀寫、模型載入及推論；評估依目的分成以下入口。
 
+## 選擇入口
 
-## 目前 Lab 入口：deblur-only
+| 目的 | 入口 | 工作內容 |
+|---|---|---|
+| 產生處理後圖片 | `python -m drone_sr` | SR、Deblur、SR→Deblur、Deblur→SR；不計算畫質指標 |
+| 原尺寸來源的無參考評估 | `evaluation/run_evaluation.py --sr/--deblur` | 相同四種順序；輸出 PNG、四項清晰度指標及 Markdown 報告 |
+| 合成退化的 SR 評估 | 同一入口加 `--legacy-sr` | 原圖降採樣 4×，比較 SR 與 bicubic 的 PSNR／SSIM／LPIPS |
+| 固定 Deblur 實驗 | `bash lab/run.sh` | 四組模糊條件、遍歷 Deblur 權重、輸出三份 CSV |
 
-本輪本機完成的是程式、synthetic／mock 與四指標驗證。使用者自行 push，再於 lab pull、準備權重與圖片；
-五顆真 checkpoint 的載入、GPU 相容性、實際時間／VRAM／RAM、分塊接縫及去模糊效果尚未驗證。
-本輪沒有跑 SR／combine 真實評測，沒有下載 SR／deblur／AlexNet 預訓練權重。
+`lab/run.sh` 是獨立實驗入口，不再轉呼叫 `run_evaluation.py`。評估指令、指標定義與結果限制見 [evaluation/README.md](evaluation/README.md)。
 
-在 lab 的 Linux repo 根目錄更新既有環境：
+## 環境與安裝
 
-```bash
-git pull --ff-only origin main
-.venv/bin/python -m pip install -r requirements-wsl.txt
-.venv/bin/python -m pip install --no-deps --no-build-isolation -e .
-.venv/bin/python -m pip install -r evaluation/requirements.txt
-.venv/bin/python -m pip check
-mkdir -p models/sr models/deblur evaluation/data/input
-```
+目標為 **Linux／WSL Ubuntu 24.04、x86_64、Python 3.12**。在 repository 根目錄執行以下指令；Windows 使用者也須在 WSL 內使用 Git、Python 與 pip。
 
-沒有 .venv 時，先建立 Python 3.12 環境並安裝固定 CUDA wheels，再接上面的三個 pip install／pip check：
+既有環境沿用 `.venv`。全新環境的步驟如下；這次修改未重新驗證乾淨環境安裝，首次下載包含數 GB 的框架／CUDA 套件，需先確認磁碟與網路成本。
 
 ```bash
 python3.12 -m venv .venv
 .venv/bin/python -m pip install --no-deps --progress-bar off \
   'https://download.pytorch.org/whl/cu128/torch-2.11.0%2Bcu128-cp312-cp312-manylinux_2_28_x86_64.whl' \
   'https://download.pytorch.org/whl/cu128/torchvision-0.26.0%2Bcu128-cp312-cp312-manylinux_2_28_x86_64.whl'
-```
-
-新增依賴固定為 `spandrel_extra_arches==0.2.0`、`opencv-python-headless==4.11.0.86`、
-`scikit-image==0.26.0`；本機 NumPy 2.5.3／SciPy 1.18.1 與 pip check 通過。
-首次框架套件約 4 GB，預留約 15 GB 安裝空間；網路較慢時可能超過十分鐘。
-LPIPS 套件保留供 legacy，deblur 入口不初始化它，也不需要其 AlexNet 權重。
-
-把需要的 checkpoint 放在 `models/deblur/` 第一層；名稱只是識別，報告依實際檔案 SHA-256／架構記錄。
-以下是預定支援與下載來源，使用者自行準備，不代表本機真權重驗收：
-
-| 候選 | 檔名／官方定位 | 來源 | 載入器 |
-|---|---|---|---|
-| FFTformer GoPro | fftformer_GoPro.pth | [官方 releases](https://github.com/kkkls/FFTformer/releases) | Spandrel core |
-| NAFNet GoPro width64 | NAFNet-GoPro-width64.pth | [官方權重](https://drive.google.com/file/d/1S0PVRbyTakYY9a82kujgZLbMihfNBLfC/view) | core |
-| Restormer Motion Deblurring | motion_deblurring.pth | [官方資料夾](https://drive.google.com/drive/folders/1czMyfRTQDX3j3ErByYeZ1PM4GVLbJeGK) | extra arches |
-| Uformer-B GoPro | GoPro/Uformer_B/models/model_best.pth | [官方 repo](https://github.com/ZhendongWang6/Uformer) | core |
-| MPRNet Deblurring | model_deblurring.pth | [官方權重](https://drive.google.com/file/d/1QwQUVbk6YVOJViCsOKYNykCsdJSVGRtb/view) | extra arches |
-
-Uformer 等外部下載可能需要登入；放入第一層時可將 model_best.pth 改為可辨識檔名，避免同名覆蓋。
-Restoration 類別也包含 denoise，仍須核對下載來源。一般 SR／legacy 用 `models/sr/`，本次 deblur 不需要任何 SR。
-GT 目錄／既有檔案保留，不讀、不要求、不刪除。
-
-把少量原尺寸 PNG／JPG／JPEG 放在 `evaluation/data/input/` 第一層。先確認 lab 實際 GPU／記憶體；
-腳本會列 CUDA 裝置、可用 VRAM、host RAM 與 cgroup 限制。GPU 不可用會停止，不改跑 CPU。
-
-```bash
-# 先選一顆，確認輸出、耗時與資源：
-CUDA_VISIBLE_DEVICES=0 bash lab/run.sh --deblur-model models/deblur/fftformer_GoPro.pth --limit 1
-# 確認首張成本後，使用同一批圖片遍歷已放入的 deblur 權重：
-CUDA_VISIBLE_DEVICES=0 bash lab/run.sh --input evaluation/data/input --limit 1
-# 可加 --seed 37 固定隨機取樣；確定資源足夠後才自行增加 --limit。
-```
-
-腳本固定 `--deblur`，允許 `--deblur-model`、`--input`、`--limit`、`--seed`、`--runs-root`；
-不接受 SR／combine／legacy。空模型目錄、空輸入或無 GPU 會明確退出。
-壞權重／壞圖會記錄並繼續其他候選／圖片；指標執行錯誤也使退出碼非零，但保留成功 PNG 與其他分數。
-正常不可量測的 N/A（如沒有 CPBD 邊緣）不當成推論失敗。
-
-每次建立 `evaluation/runs/<new-run>/`，內含互鏈的 `report.md`、`per_image.md` 與各組最終 PNG。
-主報告列逐模型身分／資源／摘要與共同有效樣本；逐張檔保留四值前後／ratio 或 delta／有效性／排除原因／CPBD debug。
-先從樣本連結目視清晰度、雜訊、色偏與 tile 邊界，再決定批量大小。四項分數不合成總分，也不等於去模糊成功率。
-完整四指標定義、來源授權與可選 evaluation 命令見 [evaluation/README.md](evaluation/README.md)。
-
-本機驗證保留使用者原先未提交的 `image_io.py`／`test_image_io.py` DJI MPO 支援；
-依「只提交本次差異」規則，這兩項既有改動未納入本次 commits。若 lab 使用 DJI MPO JPEG，需由使用者另行提交／同步該既有支援。
-本次沒有搬移 `models/model.pth`、修改素材或重建 Docker／Colab。
-
-## 目前一般 CLI：SR／deblur 與處理順序
-
-以下為目前程式介面；後面的歷史執行紀錄與鎖定舊 commit 的 Colab 範例保留其當時語義。
-本機只驗證 synthetic／mock，新增候選的真權重、GPU 及畫質尚待 lab 實測。
-
-在 Linux／WSL 的 repo 根目錄，沿用下方 Python 3.12 安裝流程及固定版本。
-必要套件為 Spandrel 0.4.2 加上 `spandrel_extra_arches==0.2.0`（已納入 requirements）。
-已有環境更新：
-
-```bash
 .venv/bin/python -m pip install -r requirements-wsl.txt
 .venv/bin/python -m pip install --no-deps --no-build-isolation -e .
-.venv/bin/python -m pip check
 ```
 
-由使用者準備 `models/sr/` 與 `models/deblur/`，不自動下載／搬移權重。
-至少指定一個模式，不能重複；只要求啟用階段的權重，`--model` 是 `--sr-model` 別名。
+需要評估或 Lab 實驗時，再安裝其既有依賴：
+
+```bash
+.venv/bin/python -m pip install -r evaluation/requirements.txt
+.venv/bin/python -m pip check
+mkdir -p input output models/sr models/deblur evaluation/data/input
+```
+
+版本以 [requirements-wsl.txt](requirements-wsl.txt)、[pyproject.toml](pyproject.toml) 與 [evaluation/requirements.txt](evaluation/requirements.txt) 為準：Torch 2.11.0／Torchvision 0.26.0（CUDA 12.8 wheels）、Spandrel 0.4.2、extra arches 0.2.0、Pillow 12.3.0；評估另用 LPIPS 0.1.4、OpenCV headless 4.11.0.86、scikit-image 0.26.0 等。
+
+一般 CLI／一般評估會選可用 CUDA，否則使用 CPU；CUDA 推論失敗不自動改用 CPU 重跑。**Lab 要求可用 CUDA，不能改用 CPU。** 執行前應確認 WSL 的 GPU 可見性、驅動相容性及實際可用記憶體，不能只由 GPU 型號推定可跑。
+
+## 準備權重
+
+程式不自動下載 SR／Deblur checkpoint。一般 CLI 必須明確提供所啟用階段的權重；下列來源沿用既有專案記錄，本次未重新下載或逐顆驗證。
+
+| 模型 | 來源 | 說明 |
+|---|---|---|
+| Real-ESRGAN general x4v3 | [官方權重](https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-x4v3.pth) | SR 4×，可放在 `models/sr/` |
+| FFTformer GoPro | [官方 releases](https://github.com/kkkls/FFTformer/releases) | Deblur |
+| Uformer-B GoPro | [官方 repository](https://github.com/ZhendongWang6/Uformer) | Deblur |
+| Restormer Motion Deblurring | [官方權重資料夾](https://drive.google.com/drive/folders/1czMyfRTQDX3j3ErByYeZ1PM4GVLbJeGK) | Deblur，extra arches |
+| MPRNet Deblurring | [官方權重](https://drive.google.com/file/d/1QwQUVbk6YVOJViCsOKYNykCsdJSVGRtb/view) | Deblur，extra arches |
+
+SR 必須是 RGB、purpose=SR、scale>1；Deblur 必須是 RGB、purpose=Restoration、scale=1。Restoration 也可能是去噪模型，仍需核對權重來源與任務。
+
+**Lab 會跳過所有檔名為 `NAFNet-GoPro-width64.pth` 的 checkpoint（含子目錄）**：既有短試跑出現彩色區塊／棋盤紋，使用者已授權排除。一般 CLI／一般評估沒有這項自動排除規則；歷史結果與權重保留。
+
+## 實際處理圖片
+
+至少指定 `--sr` 或 `--deblur`，旗標出現順序就是處理順序，每個模式最多一次。`--model` 是 `--sr-model` 的別名。
 
 ```bash
 .venv/bin/python -m drone_sr --sr --sr-model models/sr/model.pth --input input --output output/sr
@@ -98,291 +67,94 @@ CUDA_VISIBLE_DEVICES=0 bash lab/run.sh --input evaluation/data/input --limit 1
 .venv/bin/python -m drone_sr --deblur --sr --deblur-model models/deblur/selected.pth --sr-model models/sr/model.pth --input input --output output/deblur-sr
 ```
 
-階段間不寫中間圖片，只在最終輸出 PNG；FP32，512 core／32 halo，descriptor 負責 padding／裁回。
-不適合外部分塊的 deblur descriptor 走完整圖片，因此大圖記憶體需求仍待 lab 確認，失敗不改用 CPU 重跑。
-SR 要 RGB／SR／scale>1，deblur 要 RGB／Restoration／scale=1；Restoration 也可能是 denoise，
-必須另核對來源。核心＋官方 extra registry 覆蓋 FFTformer、NAFNet、Restormer、Uformer、MPRNet，
-這不代表五顆真權重已載入驗收。
+`--input`／`--output` 可各自省略，預設 `input/`／`output/`；CLI 相對路徑以執行時目錄為準。輸入與輸出不得是同一資料夾或其目錄別名。
 
-每張失敗會續行；第二階段失敗不會覆寫既有成功檔，也不計新成功。
-一般 CLI 可原子替換同名舊輸出，因此上述四模式使用不同輸出目錄。
-Docker 使用本次原始碼重新建置時，需在下方 `docker run` 的 image 名稱後明確加上
-`--sr --sr-model models/sr/model.pth`，models 掛載仍為唯讀；本輪沒有重建或重跑 Docker。
+- 只掃第一層 JPG／JPEG／PNG／TIF／TIFF，副檔名不分大小寫；依檔名穩定排序，逐張處理。
+- 依 EXIF 校正方向、轉 RGB；DJI MPO 取主影格。拒絕其他多影格來源與超過 8-bit 的 PNG／TIFF；不保留 alpha、EXIF 或 GIS metadata。
+- 使用 FP32；階段間保留 tensor，只保存最終 PNG。通常大於 512 像素時使用 512 core／32 halo 分塊；不支援外部分塊的 Deblur descriptor 使用整張推論。
+- 分塊仍需要完整輸入／輸出的 RAM；不支援尺寸或 OOM 會記錄失敗，不自動縮圖。先用少量代表圖確認資源與輸出。
+- 單張失敗會繼續下一張；stdout 列來源→實際输出檔名，以及 Processed／Failed。成功或空輸入退出 0，處理失敗退出 1，argparse 參數錯誤退出 2。
 
+## 所有圖片入口共用的撞名規則
 
-## 舊版 SR Lab 流程與歷史紀錄（目前 deblur 請用上方入口）
+各入口按自己的處理順序，以原始檔名去掉副檔名後加 `.png`。名稱已被既有檔案、目錄、符號連結或同批圖片占用時，使用第一個可用的編號：
 
-此 repo 為 [`Minervamuses/drone-image-analysis`](https://github.com/Minervamuses/drone-image-analysis) 的測試副本，程式與既有測試來自 commit `725605585148581eb679836310befdf5612e2499`。只補上本節、`lab/run.sh` 與一張真實小樣本；下方原專案說明保留作為背景。
-
-### 第一次 clone 與安裝
-
-此 repo 公開可讀，lab server 使用 HTTPS clone／pull 不需要設定 GitHub SSH 金鑰。先只執行 clone，成功才切換目錄：
-
-```bash
-git clone https://github.com/Minervamuses/test.git && cd test
+```text
+a.jpg → a.png
+a.png → a(2).png
+下一個 a.* → a(3).png
 ```
 
-確認目前已在 `test/` repo 根目錄，再複製下面的完整安裝區塊，包含最外層括號。命令先檢查目錄，再於子 shell 內安裝；任何一步失敗就停止。若上一段 clone 失敗，不要繼續安裝。
+若 `a.png`、`a(2).png` 已存在，新的 `a.jpg` 從 `a(3).png` 開始；舊檔、輸入、權重與檔案別名保持原樣。失敗的圖片可能已保留批次內的名稱，編號不保證連續。
 
-```bash
-(
-set -e
-test -f lab/run.sh
-test -f requirements-wsl.txt
-python3.12 -m venv .venv
-.venv/bin/python -m pip install --no-deps --no-cache-dir --progress-bar off \
-  'https://download.pytorch.org/whl/cu128/torch-2.11.0%2Bcu128-cp312-cp312-manylinux_2_28_x86_64.whl' \
-  'https://download.pytorch.org/whl/cu128/torchvision-0.26.0%2Bcu128-cp312-cp312-manylinux_2_28_x86_64.whl'
-.venv/bin/python -m pip install --no-cache-dir --only-binary=:all: --progress-bar off -r requirements-wsl.txt
-.venv/bin/python -m pip install --no-deps --no-build-isolation -e .
-.venv/bin/python -m pip install -r evaluation/requirements.txt
-.venv/bin/python -m pip check
-)
-```
+命名由 `image_io.unique_output_path` 在流程層分配；低階寫圖函式仍接收明確的目的路徑。Legacy 的 `hr/lr/bicubic/sr` 四個目錄採同一個檔名，報告列出實際名稱；新評估報告及 Lab CSV 保存實際路徑。Lab 不再使用 `a.JPG.png` 格式。既有歷史產物不重新命名。
 
-安裝成功後，於同一個 repo 根目錄繼續「準備正式權重」。若 `test/` 已經存在，請先進入既有 repo 並 `git pull --ff-only origin main`，不要重複 clone。
+此規則針對圖片。評估每次仍建立新 run，保留其既有時間戳命名及禁止重用 run／模型組目錄的規則。
 
-沿用原專案的 Linux x86_64／Python 3.12／CUDA 12.8 套件，不修改依賴版本。套件下載約 4 GB，首次 LPIPS 另下載約 233 MB 的 AlexNet，請預留約 15 GB 安裝空間。安裝時間受網路影響，可能超過十分鐘。Server 需能連線 GitHub、PyTorch、NVIDIA 套件站與 PyPI。
+## Lab：固定四組 Deblur 實驗
 
-使用者提供的 server 是 Ubuntu 24.04.2、Python 3.12.3、glibc 2.39，四張 RTX A6000（每張 49140 MiB）、driver 595.58.03。**cgroup 記憶體上限為 60 GiB**，不能將 `free -h` 顯示的 377 GiB 當成本程序可用量。測試預設選一張 GPU；CUDA wheel 是否能在該 server 實際執行，由下方入口的 GPU 檢查確認。
+Lab 僅接受 `--help` 與 `--limit N`。**不帶 `--limit` 會處理全部輸入**，且每張都交給全部未排除的 checkpoint。
 
-### 準備正式權重
-
-Git 不包含模型權重。若已有正式 Compact 權重，將它放在 `models/model.pth`；否則在 repo 根目錄執行下面區塊，從原專案已指定的官方來源下載約 4.9 MB 並核對已記錄的 SHA-256。已有檔案會先核對，不覆寫；下載失敗不會留下名為 `model.pth` 的半成品。
-
-```bash
-.venv/bin/python - <<'PY'
-import hashlib
-from pathlib import Path
-from urllib.request import urlopen
-
-target = Path("models/model.pth")
-expected = "8dc7edb9ac80ccdc30c3a5dca6616509367f05fbc184ad95b731f05bece96292"
-url = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-x4v3.pth"
-if target.exists():
-    data = target.read_bytes()
-else:
-    with urlopen(url, timeout=120) as response:
-        data = response.read()
-if hashlib.sha256(data).hexdigest() != expected:
-    raise SystemExit("Checkpoint SHA-256 mismatch; no file was written.")
-if not target.exists():
-    with target.open("xb") as stream:
-        stream.write(data)
-print("models/model.pth: SHA-256 OK")
-PY
-```
-
-### 執行與後續 pull
-
-```bash
-# 第一次安裝與準備權重後：指定當下獲分配的 GPU 編號
-CUDA_VISIBLE_DEVICES=0 bash lab/run.sh
-
-# 後續更新同一個 lab clone
-git pull --ff-only origin main
-CUDA_VISIBLE_DEVICES=0 bash lab/run.sh
-```
-
-入口先確認 CUDA、執行 `pip check`，再呼叫 `evaluation/run_evaluation.py`，預設使用 `--all` 依序評估 `models/` 第一層的所有 checkpoint，不要求固定的 `model.pth`。也可用 `bash lab/run.sh --model NAME.pth` 指定其中一顆。**CUDA 不可用會停止，不會改成 CPU 跑完整流程。** CPU 的數值計算預設使用 8 個 OpenMP／MKL threads，可透過 `OMP_NUM_THREADS`／`MKL_NUM_THREADS` 覆寫。模型與 LPIPS 使用可見 GPU 的第 0 張，並沒有多 GPU 平行處理。
-
-預設使用 `lab/sample/` 的一張 **512×512** 圖，評估時先降採樣成 128×128，再還原成 512×512。每顆 checkpoint 都使用同一批圖片；請確認各輪 `measured` 是 1、`excluded` 是 0。這是小樣本驗證，**不是 4056×3040 大圖驗證**。測試套件與 GPU 決定性探測不再於每次評估前重跑；需要時可分別執行 `.venv/bin/python -m unittest discover -s tests`、`.venv/bin/python -m unittest discover -s evaluation` 或 `bash evaluation/gpu_checks/run_on_user_shell.sh`（測試及交接腳本仍使用 `models/model.pth`）。
-
-若圖片已另行上傳 server，可改用自己的資料夾：
-
-```bash
-CUDA_VISIBLE_DEVICES=0 bash lab/run.sh --input /path/to/images --limit 1
-```
-
-`--limit` 限制每顆 checkpoint 使用的相同圖片批次。先以一張確認耗時與結果，再決定是否增加數量。4.7 GB 的本機原始資料集與歷次輸出沒有推上此 repo，`git pull` 不會取得它們。
-
-每顆 checkpoint 的結果各自放在 `evaluation/runs/<timestamp>/`，包含標註模型名稱與 SHA-256 的 `report.md`、`hr/`、`lr/`、`bicubic/`、`sr/`。請回傳終端機輸出與 report，並檢視對應影像；小樣本通過不代表大圖效能或真實低解析影像的畫質已驗證。每次執行建立新目錄，舊結果保留且不納入 Git。
-
-### 小樣本來源
-
-`lab/sample/whaledrone_seek10s_x1536_y768_512.png` 為既有驗證使用的原始 PNG，263,958 bytes，SHA-256 `ad7d8815928ea78bb2243af8639541216e83a7444d78272d91451a2d7dd63faa`。來源為 [WhaleDrone: Los Cabos Humpback Whale UAV Dataset](https://huggingface.co/datasets/LucieLprt-Dvldr/WhaleDrone)，作者 Lucie Laporte-Devylder；資料集另列 Esther Jimenez、Hiram Rosales Nanduca 為共同貢獻者。依資料集的 [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/) 授權，用於非商業研究測試並保留署名。
-
-本專案的處理為：從 `DJI_20260114193309_0004_V.MP4` 第 10 秒取 RGB 畫面，裁切 `(x=1536, y=768, width=512, height=512)` 後存成 PNG。影片 SHA-256 為 `8dddd14150efee239002d536fa33446629cbde3979ce4e76429a23a4c1f56fda`。這張裁切是鏡像額外納入 Git 的小樣本；原始資料集與其他 `test-data/` 仍排除。
-
-### 此副本的驗證狀態
-
-2026-09-19 在本機 WSL、RTX 5070 Ti Laptop GPU，借用既有 `.venv`、Compact 權重與 AlexNet 快取實跑 `lab/run.sh`：`pip check`、33 項主程式測試、94 項評估測試全數通過；一張真實樣本兩條線都成功、0 張排除，LPIPS 與 SR 決定性皆為 True，產生 `report.md` 與 512×512 結果。已開啟來源與 SR 輸出確認構圖、尺寸及可解碼性；SR 水面細紋較平滑，不宣稱畫質提升。另以空的 `CUDA_VISIBLE_DEVICES` 確認入口在測試前退出，不改走 CPU。
-
-Lab server 的安裝與 GPU 執行尚待使用者實跑；本次也未重新建立乾淨環境或重下載依賴。下方原專案的歷史驗證紀錄不是該 server 的測試結果。
-
----
-
-本機、單一 Spandrel 推論流程：從 `input/` 或指定資料夾逐張讀圖，以專案內的 `models/model.pth` 放大，把同 stem 的 RGB PNG 寫進 `output/` 或指定資料夾，原圖保留不動。沒有 GUI，不訓練或微調，也沒有模型選擇參數。
-
-交付預設為官方 `realesr-general-x4v3.pth`（Compact）。已完成的最大實例是一張真實 3840×2160 海面畫面處理為 15360×8640 PNG；SwinIR-M 另通過 512×512 真實裁切與最小分塊相容性。已驗證與未驗證的項目逐條列於「驗證狀態」。
-
-## 涵蓋範圍
-
-**會做：** 資料夾批次；逐張隔離失敗並給出 `Processed`／`Failed` 摘要與退出碼；自動選用 CUDA 或 CPU；超過 512 的圖自動分塊；讀入時依 EXIF Orientation 校正方向；拒絕多頁、高位深與浮點來源。
-
-**不會做：** 不下載權重；不遞迴掃描子資料夾；不轉換影片；**本 pipeline 本身不計算任何畫質指標**，也不做模型排名；不保存 alpha、EXIF、GIS 等 metadata；不提供 Docker 映像。
-
-PSNR／SSIM／LPIPS 由另一個獨立工具 [`evaluation/`](evaluation/README.md) 提供，它以合成退化自造真值，比較本 pipeline 與 bicubic 放大。該工具只 import `src/drone_sr/` 的公開函式，不改動它，產物也只寫在 `evaluation/runs/` 之下。
-
-## 採用的環境與版本
-
-目標為 Linux／WSL Ubuntu 24.04、Python 3.12、x86_64。使用 `.venv` 與 pip，透過 setuptools 的 editable 安裝連結 `src/drone_sr/`；模型位置固定錨定原始專案目錄，與執行命令的位置無關。
-
-| 元件 | 版本／來源 |
+| 設定 | 固定行為 |
 |---|---|
-| Python | 本機 3.12.3，Ubuntu 24.04.2 |
-| pip | venv 內 24.0 |
-| torch | 2.11.0+cu128，PyTorch 官方 CUDA 12.8 wheel |
-| torchvision | 0.26.0+cu128，與 torch 配對的官方 wheel |
-| spandrel | 0.4.2，PyPI |
-| Pillow | 12.3.0，PyPI |
-| setuptools | 81.0.0，`setuptools.build_meta` |
-| NumPy／safetensors／einops | 2.5.3／0.8.0／0.8.2，PyPI 傳遞依賴 |
-| Triton | 3.6.0，PyPI 傳遞依賴 |
-| CUDA runtime／cuDNN | 12.8.90／9.19.0.56，NVIDIA 官方 wheel |
+| 輸入 | `evaluation/data/input/` 第一層 PNG／JPG／JPEG |
+| 權重 | 遞迴掃描 `models/deblur/` 的 .pth／.pt／.ckpt／.safetensors |
+| 取樣 | 先按檔名排序，以 seed=923 洗牌，再取前 N 張 |
+| 分组 | 循環分配 none／linear／trajectory／gaussian，每圖只屬一組 |
+| 尺寸 | 保留原尺寸，不裁切或自動縮小 |
 
-torch／torchvision 的版本配對依 [PyTorch 官方安裝說明](https://pytorch.org/get-started/previous-versions/)；採 CUDA 12.8 wheel 的依據是 [Blackwell 支援](https://pytorch.org/blog/pytorch-2-7/)。[requirements-wsl.txt](requirements-wsl.txt) 固定主要套件、Triton 與必要 CUDA wheel 的版本／官方來源；NVIDIA wheel 的 SHA-256 與 PyPI 對應檔案相同。NumPy、safetensors、einops 等其餘傳遞依賴由 pip 解析，上表記錄本次實際版本，並非完整 lock。
+固定條件：none 不加模糊；linear 為 8 px／45° 直線；trajectory 為 90° 圓弧、最大 XY 跨度 8 px；gaussian 為 σ=2 px、13×13 核。合成模糊使用線性光與反射邊界。所有模型使用同一批圖片及分組。
 
-本機唯讀資源觀察為 NVIDIA GeForce RTX 5070 Ti **Laptop** GPU，driver 591.74，VRAM 12227 MiB，compute capability 12.0。這些硬體資訊本身不能證明 checkpoint 可推論；實測狀態見「驗證狀態」。
+Lab 必須事先準備 LPIPS 套件與 AlexNet backbone，禁止自動下載。預設 backbone 位置：
 
-## 安裝
-
-以下是已批准的 Linux x86_64／Python 3.12 安裝步驟，請在專案根目錄執行。其他 Python 版本需另選對應 wheel。GPU 需要 WSL 可見的相容 NVIDIA driver；套件會提供 CUDA runtime，不需另行安裝系統 CUDA Toolkit。
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --no-deps --no-cache-dir --progress-bar off \
-  'https://download.pytorch.org/whl/cu128/torch-2.11.0%2Bcu128-cp312-cp312-manylinux_2_28_x86_64.whl' \
-  'https://download.pytorch.org/whl/cu128/torchvision-0.26.0%2Bcu128-cp312-cp312-manylinux_2_28_x86_64.whl'
-python -m pip install --no-cache-dir --only-binary=:all: --progress-bar off -r requirements-wsl.txt
-python -m pip install --no-deps --no-build-isolation -e .
+```text
+models/torch-cache/hub/checkpoints/alexnet-owt-7be5be79.pth
 ```
 
-第一步只裝兩個官方 wheel，第二步補齊必要依賴，完成前請勿執行推論。
-
-來源採 PyTorch 的 `download.pytorch.org`、NVIDIA 的 `pypi.nvidia.com`，其餘套件使用 PyPI。前者避開本機曾回傳 403 的 `download-r2.pytorch.org`；NVIDIA 來源則處理 PyPI cuDNN 下載過慢的實際問題。CUDA wheel 約 2.93 GB，另有 torch／torchvision 約 0.83 GB 與其餘套件，合計約 4 GB。安裝期間請保留約 15 GB 磁碟；本機完成後 `.venv` 實測約 6.7 GiB。本次沿用第一次已下載成功的兩個 wheel、從本機檔案安裝後再接上述依賴命令，花費 11 分 13 秒；沒有重跑一次全新環境建置，其他網路環境的時間未驗證。
-
-## 準備與執行
-
-1. 將下方指定的 Compact RGB SR `.pth` 權重準備為專案的 `models/model.pth`。程式不會下載模型。本機保留原檔名，並以相對 symlink `models/model.pth → realesr-general-x4v3.pth` 使用它。
-2. 將圖片放在 `input/` 或指定資料夾第一層，接受 `.jpg`、`.jpeg`、`.png`、`.tif`、`.tiff`（大小寫皆可），不遞迴掃描。
-3. 在專案根目錄、啟用環境後執行：
+可從 [PyTorch 官方 AlexNet 權重](https://download.pytorch.org/models/alexnet-owt-7be5be79.pth) 另行取得並放到該路徑，或以 `TORCH_HOME` 指向既有 Torch cache。LPIPS 的 `weights/v0.1/alex.pth` 校準權重則由已安裝的 lpips 套件提供；腳本會檢查兩者。
 
 ```bash
-python -m drone_sr
+bash lab/run.sh --help
+CUDA_VISIBLE_DEVICES=0 bash lab/run.sh --limit 1
+# 確認首張成本、輸出及 cache 後，四張可涵蓋四組：
+CUDA_VISIBLE_DEVICES=0 bash lab/run.sh --limit 4
 ```
 
-指定資料夾時：
+`--limit 1` 只涵蓋 none 組；不是四組驗證，也不是只跑一顆模型。腳本會列裝置、可用 VRAM、host RAM、cgroup 限制及耗時。全量與長時間實驗需另行確認成本。
+
+每次建立 `evaluation/runs/deblur/<UTC時間>/`：
+
+| 產物 | 內容 |
+|---|---|
+| `inputs/`、`outputs/<checkpoint相對路徑>/` | 已分組模型輸入、每模型的最終 PNG |
+| `full_reference.csv` | 原圖／輸入／輸出對應，PSNR／SSIM／LPIPS、狀態與錯誤 |
+| `summary.csv` | 每模型三項均值、expected／success／failed、PSNR inf 數與 partial 狀態 |
+| `sharpness.csv` | 原圖各一次、各模型輸出各一次的四項清晰度原值與有效性 |
+
+Deblur 模型釋放後才載入 LPIPS。PSNR／SSIM 在 CPU float64 計算，LPIPS 使用 CUDA；比較對象是加模糊前的原圖與實際保存 PNG。摘要使用三項全參考分數皆成功的共同圖片；失敗列保留，不假裝全量平均。PSNR=inf 保留並納入 Lab 平均。
+
+四項清晰度局部缺值不使有效的全參考成績失敗。任一全參考失敗最後退出 1；單張／單模型失敗仍繼續其他項目。CSV 的 ok 只表示處理與量測完成，不保證畫質改善。
+
+## 模組與驗證狀態
+
+`metric_defs.py` 是四指標清單與比值指標集合的唯一來源，不 import 其他模組；`blur_metrics.py` 計算，`summary.py` 統計，`report.py` 呈現，Lab 引用清單組 CSV 欄位。Lab 的 help 在 ML 套件載入之前處理。
+
+2026-10-06 的命名／常數調整已用 CPU 小圖、替代模型、既有指標／報告測試及入口檢查驗證；未重新執行真實 checkpoint、GPU 推論或乾淨環境安裝。可重跑的相關檢查：
 
 ```bash
-python -m drone_sr --input "/path/to/images" --output "/path/to/sr-results"
+PYTHONPATH=src:tests:evaluation OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+  .venv/bin/python -B -m unittest \
+  test_cli test_image_io test_runner.OrderedBatchTests test_runner.LegacyNamingTests \
+  test_blur_metrics test_summary test_report \
+  test_run_evaluation.EvaluationSelectionTests \
+  test_run_evaluation.EvaluationModeTests \
+  test_run_evaluation.ModeIntegrationTests
+bash -n lab/run.sh
+PYTHONDONTWRITEBYTECODE=1 bash lab/run.sh --help
 ```
 
-兩個參數各自可省略，預設為 `input/`、`output/`，相對路徑以執行時的工作目錄為基準；含空白的路徑請加引號。模型固定於原始專案內，不隨資料夾參數改變。
+`test_run_evaluation.LabArgumentsTests` 尚在測試舊 Lab 轉呼叫介面：本次發現 7 個 assertion failures（含子案例）與 1 個 error，在原始提交 `3359a7c` 也可重現，未列入上述選定檢查、未刪除或修改。部分其他 legacy 測試會載入模型或下載 AlexNet，不應直接把完整測試探索當成無權重檢查。
 
-### 讀寫契約
+既有 Lab 四張真圖短試跑與代表圖觀察記錄於 [deblur/build-log.md](deblur/build-log.md)；NAFNet 的異常尚未定位，四模型全量結果仍不能由本次程式測試代替。生成的紋理不等於真實地物細節。
 
-- 檔名對應同 stem 的 PNG，例如 `input/DJI_001.JPG` 對應 `output/DJI_001.png`。輸出資料夾不存在會建立。
-- 成功的 PNG 完整寫入後才替換同名舊結果；來源與其 symlink／hard link 不可被當作輸出覆寫。輸出檔權限為 `0600`（原子寫入的副作用）。
-- **方向：** 讀入時先依 EXIF Orientation 把方向校正到像素上，輸出 PNG 不保留方向標記。
-- **拒絕的來源：** 多頁 TIFF 與多影格 PNG；每通道超過 8-bit 的高位深來源；浮點影像。高位深依**容器編碼**判定（PNG 的 IHDR 位深、TIFF 的 `BitsPerSample`），不是只看解碼後的 Pillow mode，因此 16-bit 彩色也擋得住。1／2／4-bit 與調色盤圖片是合法輸入，照常處理。
-- 其餘圖片一律轉成 RGB；不保存 alpha、EXIF、GIS 或其他 metadata。
-- 啟動時自動選擇可用 CUDA，否則使用 CPU，並顯示 `Device`；CUDA 執行失敗會報錯，不會暗中改成 CPU 重跑大圖。
-
-### 失敗處理與退出碼
-
-- 缺輸入、輸出路徑是檔案、輸入與輸出為同一資料夾、缺模型或模型載入失敗會報錯並停止；空輸入顯示 `No supported images found in input/`（指定路徑則顯示該路徑）。
-- 檔名穩定排序、逐張處理，模型只載入一次。
-- 壞圖、推論或儲存失敗會列出檔名及原因，繼續下一張。多張輸入映射同名 PNG 時，衝突項全部記失敗；輸出指向任何輸入的 symlink／hardlink 也拒絕。
-- 成功寫出的數量為 `Processed`，其餘為 `Failed`。全部成功或沒有支援的圖片時退出碼 0；設定錯誤或任一圖片失敗為 1。
-
-## 自動分塊與資源
-
-- 寬、高都不超過 **512** 時整張推論；任一邊超過 512 就分塊，無需額外參數。
-- 每塊有效核心最多 **512×512**，四側各帶 **32 像素上下文**，模型最大接收 576×576；圖片外緣依實際範圍裁切。按模型倍率裁掉上下文，只把核心寫回一次，descriptor 自動處理最低尺寸／補邊／裁回。
-- 完整輸入與大圖拼接結果留在 CPU RAM，GPU 一次只處理當前塊。4K 圖做 4× 時，完整 RGB float32 結果本體約 **1.48 GiB**，編碼另需副本；本機代表批次程序峰值 RSS 約 **5.44 GiB**。分塊不能消除完整輸出的 RAM 需求，請先用少量圖片確認其他尺寸。
-- SwinIR descriptor 的 `DISCOURAGED` 表示可分塊但上下文可能改變結果。僅驗證過 192×176、內部核心 128 的小例；未驗證 SwinIR 的 512 核心大圖或所有場景接縫。大圖預設採已驗證的 Compact。
-
-## 採用的權重
-
-- 檔案：[realesr-general-x4v3.pth（官方下載）](https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-x4v3.pth)，4,885,111 bytes；[release v0.2.5.0](https://github.com/xinntao/Real-ESRGAN/releases/tag/v0.2.5.0)，asset id 76259217，asset 更新時間 2022-08-30。
-- 本機 SHA-256：`8dc7edb9ac80ccdc30c3a5dca6616509367f05fbc184ad95b731f05bece96292`。官方 API 未提供 digest；此值用於本次取得檔案的追溯與後續一致性檢查。
-- 實際 descriptor：Compact／SRVGGNetCompact、RGB 3→3、原生 4×、1,213,296 個參數；本程式採 float32。只使用此單一 checkpoint，沒有混合另一個降噪權重。
-- 官方 repository [授權文件](https://github.com/xinntao/Real-ESRGAN/blob/v0.2.5.0/LICENSE) 為 BSD-3-Clause。權重與資料不納入 Git；另一台機器需另外準備檔案。
-
-### 開發者已驗證的第二 checkpoint
-
-- [SwinIR-M real-world 4× 官方權重](https://github.com/JingyunLiang/SwinIR/releases/download/v0.0/003_realSR_BSRGAN_DFO_s64w8_SwinIR-M_x4_GAN.pth)：`003_realSR_BSRGAN_DFO_s64w8_SwinIR-M_x4_GAN.pth`，67,129,861 bytes；GitHub release v0.0／asset 44142419，2021-09-06。
-- 本機 SHA-256：`b9afb61e65e04eb7f8aba5095d070bbe9af28df76acd0c9405aeb33b814bcfc6`；官方 API digest 未提供。[官方 repository LICENSE](https://github.com/JingyunLiang/SwinIR/blob/main/LICENSE) 為 Apache-2.0。
-- Spandrel 0.4.2 實測辨識為 SwinIR，RGB／4×／11,715,559 parameters；minimum=16、multiple=1。採 FP32；descriptor 不支援 FP16，tiling 為 DISCOURAGED。
-- 真實 512×512 → 2048×2048 RGB PNG：CLI 約 **11.64 秒**；獨立一次上傳＋GPU 推論 **3.24 秒**，PyTorch 峰值 allocated **4.32 GiB**／reserved **6.65 GiB**（截至 forward，排除 CUDA context、其他程序和 PNG 階段）。此案例在本機 12 GB 筆電 GPU 通過，不等於全尺寸 SwinIR 驗證。
-- 同一權重另通過 17×19 → 68×76、1×1 → 4×4 的尺寸檢查。已開啟真實 PNG，內容、色彩和尺寸正常。來源／輸出／命令／量測位於 `test-data/phase-03-swinir-20260917/`。
-- 驗證時僅暫時將 `models/model.pth` 指向此檔，完成後恢復 Compact；沒有加入模型 CLI 選項。兩顆權重都保留，交付預設為使用者選定、已通過 4K 大圖且資源需求較低的 Compact，不宣稱畫質最優。
-
-## 驗證狀態
-
-### 已實際驗證
-
-**2026-09-15 — 環境與程式契約**
-
-- `pip check` 通過；專案 editable 安裝成功。
-- 以**未訓練的極小 Compact 模型**與合成 5×7 RGB 圖實跑 `python -m drone_sr`：CPU 與 CUDA 各成功寫出 10×14 PNG，原圖 SHA-256 不變。CPU 子程序以 `CUDA_VISIBLE_DEVICES=''` 隱藏 GPU，確實走 CPU 分支；GPU 子程序自動選 `cuda:0`，wheel 包含 `sm_120`。各命令約 2.03／2.48 秒，僅是這個極小案例的耗時。
-- 缺模型、不可載入模型、壞圖的實際 CLI 錯誤與計數符合預期；既有成功 PNG 在模型錯誤後保持不變。`--help`、空輸入與缺輸入檢查通過。
-
-**2026-09-17 — 真實圖片與正式 Compact 權重**
-
-- 從 WhaleDrone 影片第 10 秒畫面取 `(x=1536, y=768, w=512, h=512)` 海面裁切，執行真正的 `.venv/bin/python -m drone_sr`：`cuda:0`、Processed 1／Failed 0，產生 2048×2048 RGB PNG，影片／輸入／權重 hash 不變。
-- CLI 含程序啟動約 **5.90 秒**；另一次同一 production 函式路徑量測，GPU 同步計時的上傳＋推論約 **0.220 秒**，PyTorch 峰值 allocated 約 **264 MiB**／reserved **284 MiB**（模型載入至推論結束，不含 CUDA context、其他程式或 PNG 輸出階段，不是整張顯卡用量）。沒有 warmup 或參數掃描，兩次結果像素一致。
-- 預設與指定（含空白／相對路徑）資料夾的批次，各用兩張真實小裁切與中間一張故意損壞的圖片：GPU 均跑到底，Processed 2／Failed 1、退出碼 1 符合預期，兩種介面輸出 hash 相同，無關 output 保留。
-- 隱藏子程序 CUDA 後，以同一正式權重與真正 CLI 跑 32×28 真實裁切，CPU 成功產生 128×112 PNG，約 2.11 秒（含啟動）；沒有拿 mock 當 CPU 證據。
-- 素材座標、格式、雜湊、完整命令與 console 存於 `test-data/phase-01-compact-20260917/`、`test-data/phase-02-cli-20260917/`。這些目錄是單次驗證紀錄，不是正式 CLI 或可重跑 benchmark。
-
-**2026-09-17 — V1 最終驗收（分塊與 4K）**
-
-- 兩模型的真實 direct／tiled 小例均成功：Compact 640×576 → 2560×2304，走正式 512 核心自動分塊；SwinIR 192×176 → 768×704，使用內部強制 128 核心。完整圖與接縫交會裁切已檢視，這些海面樣本未見明顯拼接線；不要求兩條路徑每像素相同。
-- Compact 真正 CLI 同批次處理完整 4K 圖、故意壞圖、32×28 真實小圖：**Processed 2／Failed 1／退出碼 1** 符合預期，壞圖後仍繼續。整批含啟動／推論／PNG 約 **37.96 秒**，不是單獨 GPU forward 的時間。
-- 完整輸出為 **15360×8640 RGB PNG、117,800,469 bytes**，SHA-256 `bce5bfc0b9b347f06982e13f56c49ee6cc43ca910f1bf0c558887e4d613d7822`。原圖及無關輸出 hash 保留，驗收目錄的同名舊結果只在成功後替換。
-- 完整 PNG 已解碼；影像檢視工具無法傳輸約 118 MB 原檔，因此人工檢查使用全圖縮覽、原尺寸接縫及最右／最下／右下裁切，未發現明顯拼縫、空白條、重影或裁切缺失。Pillow 對此 1.33 億像素結果會發出尺寸警告，但本次解碼成功；未停用圖片保護。
-- 本機結果：[全圖預覽](<test-data/phase-04-tiling-20260917/full batch/full-preview.png>)、[完整 PNG（約 118 MB）](<test-data/phase-04-tiling-20260917/full batch/output/a_full.png>)。來源、完整命令、尺寸、雜湊與裁切存於 `test-data/phase-04-tiling-20260917/`。
-
-**2026-09-18 — 讀圖正確性修正**
-
-`read_image()` 的兩個已重現缺陷已修正，兩者都會讓程式正常結束、輸出可正常開啟，內容卻與來源意義不符：
-
-- **EXIF 方向未套用。** 現於 mode 與單影格檢查之後、轉 RGB 之前呼叫 `ImageOps.exif_transpose()`。八個 Orientation 值（JPEG 與帶 `eXIf` chunk 的 PNG）經 `read_image()` → `write_png()` 後，輸出**逐像素**等於正確結果；Orientation 2／3／4 尺寸不變但像素會錯，只比尺寸看不出來。TIFF 由 Pillow 自行處理，未被旋轉兩次。
-- **高位深拒絕不完整。** 原本只看 `image.mode`，而 Pillow 把 16-bit PNG colortype 2／4／6 與 16-bit RGB TIFF 映射成 `RGB`／`RGBA`，通過白名單後被靜默截成 8-bit（來源通道值 256／257／511 全變成 1）。現於任何解碼之前讀容器編碼，超過 8-bit 即以 `ValueError` 拒絕，該張記為 Failed 並繼續下一張。
-- repo 內 34 張既有 8-bit 圖片經 `read_image()` → `write_png()` 的輸出位元組與修正前完全相同。
-- 真實小批次以正式 Compact 權重與真正 `python -m drone_sr` 執行（**CPU**，該輪環境 `torch.cuda.is_available()` 為 False）：同一張真實海面裁切分別做成無 EXIF 的 64×48 JPEG、真正的 16-bit RGB PNG，以及像素已旋轉並標記 Orientation 6 的 JPEG。結果 `Processed: 2`／`Failed: 1`／退出碼 1，16-bit 那張列出原因且未產生輸出檔，三張來源 SHA-256 不變。方向圖輸出為 256×192，與未旋轉參考圖同向（未修正時會是 192×256），兩者平均差 0.60／255，差異來自旋轉後重新 JPEG 編碼與模型非旋轉等變。
-
-**目前測試狀態**
-
-- 完整 correctness suite **33／33 通過、無 skipped**（V1 的 29 項加上讀圖修正新增的 4 項），既有斷言未被放寬。較早各輪的測試計數見 git 歷史。
-- 測試中的合成像素、未訓練小模型與 mock 用來驗證程式契約，**不證明真實 SR 品質或預訓練 checkpoint 相容性**。
-
-### 尚未驗證與已知限制
-
-- 2026-09-18 讀圖修正的所有檢查都在 **CPU** 執行，未在 GPU 上重跑。此修正只影響讀圖，與裝置無關，但沒有該輪的 GPU 觀察證據。
-- 位深檢查涵蓋 PNG 與 TIFF 兩種容器；JPEG 以基線 8-bit 處理，未驗證 12-bit JPEG。
-- 浮點圖片的拒絕來自兩條不同路徑：單通道 float（mode `F`）回報 `Unsupported image mode: F`；32-bit float **彩色** TIFF 則是 Pillow 連識別都失敗（`UnidentifiedImageError`），同樣記為該張 Failed，但訊息不是本程式發出的。
-- 未壓縮 TIFF ＋ Orientation 5–8 ＋ mode `L`／`P`／`RGBA`／`CMYK` 時，Pillow 會轉置像素緩衝區卻未更新 `size`，輸出既非原圖也非正確方向。這是上游缺陷，本次未處理；本專案實際輸入為 8-bit RGB，碰不到此路徑。
-- SwinIR 的 512 核心大圖與所有場景接縫未驗證。
-- 畫質：已開啟原圖與輸出檢視，海面構圖、反光位置與色彩正常，但細紋較平滑；未證明新增紋理是真實地物細節。小裁切的 VRAM 有餘裕，不能據此承諾 4K 全圖或整段影片效能。
-- 畫質量化：手上仍**沒有**配對且對齊的高解析度真值，因此本 pipeline 的輸出本身不附 PSNR／SSIM。[`evaluation/`](evaluation/README.md) 繞開這個缺口的方式是**自造真值**——拿高解析原圖降採樣成低解析輸入，再由本 pipeline 與 bicubic 各自放大回去與原圖比對。數字因此只在「純 bicubic 退化」這個前提下成立，不能當成真實低解析影像上的畫質排名。5 張 4056×3040 樣本（CPU）的實測是 **bicubic 在 PSNR 與 SSIM 上全勝、本 pipeline 在 LPIPS 上全勝**；這是 GAN 類 SR 在乾淨 bicubic 基準上的已知傾向，解讀前提見該工具的 README。
-- 驗收資料只來自使用者指定的單一 [WhaleDrone](https://huggingface.co/datasets/LucieLprt-Dvldr/WhaleDrone) MP4（資料集標示 CC-BY-NC-4.0），沒有下載 SRT 或其他影片。結果是海面場景，沒有鯨魚／道路／屋頂細節驗收。
-- 不含整段影片轉換與 Docker 映像。
-- 未重新建立第二套乾淨環境驗證安裝。
-- 圖片、權重與 `test-data/` 不納入 Git；另一台機器需自行準備 `models/model.pth` 與素材。
-
-### 重跑檢查
-
-```bash
-python -m pip check
-python -m unittest discover -s tests -p 'test_image_io.py' -v
-python -m unittest discover -s tests -p 'test_inference.py' -v
-python -m unittest discover -s tests -p 'test_cli.py' -v
-python -m unittest discover -s tests -p 'test_tiling.py' -v
-python -m unittest discover -s tests -v
-```
-
-讀圖修正的目標、階段文件與完整觀察證據見 [fix/GOALS.md](fix/GOALS.md) 與 [fix/build-log.md](fix/build-log.md)。已完成並移除的 V1 四階段計劃仍可由 git 取回，例如 `git show af6989e~1:build/build-log.md`。
+本 SR／Deblur 專案目前沒有可交付的 Dockerfile；獨立 `ocean-drone-release/` 的拼接／指標 Docker 不等於此流程的容器。舊指令與歷史測量可由 Git 歷史及既有 build-log 查閱，不能套用為目前入口的使用說明。
