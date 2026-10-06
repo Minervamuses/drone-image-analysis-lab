@@ -41,6 +41,19 @@ def read_image(path: Path) -> torch.Tensor:
         return pil_to_tensor(oriented.convert("RGB")).to(torch.float32).div_(255).unsqueeze(0)
 
 
+def unique_output_path(destination: Path, reserved: set[Path] | None = None) -> Path:
+    """Choose the first free name, counting existing files, aliases and this batch."""
+    candidate = destination
+    number = 2
+    while (candidate.exists() or candidate.is_symlink()
+           or (reserved is not None and candidate in reserved)):
+        candidate = destination.with_name(f"{destination.stem}({number}){destination.suffix}")
+        number += 1
+    if reserved is not None:
+        reserved.add(candidate)
+    return candidate
+
+
 def write_png(tensor: torch.Tensor, destination: Path, source: Path) -> None:
     if tensor.ndim != 4 or tensor.shape[:2] != (1, 3):
         raise ValueError(f"Expected RGB BCHW output, got {tuple(tensor.shape)}")

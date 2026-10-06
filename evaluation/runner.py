@@ -17,14 +17,13 @@ import json
 import random
 import resource
 import time
-from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
 import torch
 from PIL import Image
 
-from drone_sr.image_io import read_image, write_png
+from drone_sr.image_io import read_image, unique_output_path, write_png
 from drone_sr.inference import load_model, run_stages
 
 from bicubic import upscale_bicubic
@@ -137,17 +136,13 @@ def run_ordered_batch(sources, run_dir: Path, order, checkpoints: dict, baseline
                 row.update(failure_stage="model_load", reason=combo["error"])
             return combo
 
-        names = Counter(f"{source.stem}.png" for source in sources)
+        reserved = set()
         protected = sources + [Path(model["path"]) for model in models]
         for source, row in zip(sources, combo["rows"]):
             row_started = time.perf_counter()
             stage = "output"
-            destination = output_dir / f"{source.stem}.png"
             try:
-                if names[destination.name] > 1:
-                    raise ValueError(f"Multiple input files map to output: {destination.name}")
-                if destination.exists() or destination.is_symlink():
-                    raise ValueError(f"Refusing to reuse existing output: {destination}")
+                destination = unique_output_path(output_dir / f"{source.stem}.png", reserved)
                 if any(destination.resolve() == path for path in protected):
                     raise ValueError(f"Refusing to overwrite input or checkpoint: {destination}")
                 stage = "decode"
@@ -210,6 +205,7 @@ class ImageResult:
     low: tuple[int, int]
     sr: LineScores
     bicubic: LineScores
+    output_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -246,7 +242,12 @@ def _score(truth, candidate, perceptual) -> LineScores:
 
 def process_image(source: Path, run_dir: Path, sr_line, perceptual) -> ImageResult:
     """Decode, degrade, upscale both ways, measure. Raises _StageError on failure."""
-    name = source.stem + ".png"
+    with _stage("output", source):
+        # Keep the same basename in all four folders, including partial prior outputs.
+        folders = [run_dir / kind for kind in ("hr", "lr", "bicubic", "sr")]
+        occupied = {folders[0] / path.name for folder in folders if folder.is_dir()
+                    for path in folder.iterdir()}
+        name = unique_output_path(folders[0] / f"{source.stem}.png", occupied).name
     hr_path, lr_path = run_dir / "hr" / name, run_dir / "lr" / name
     bicubic_path, sr_path = run_dir / "bicubic" / name, run_dir / "sr" / name
 
@@ -273,6 +274,7 @@ def process_image(source: Path, run_dir: Path, sr_line, perceptual) -> ImageResu
 
     return ImageResult(
         source_name=source.name,
+        output_name=name,
         original=record.original,
         cropped=record.cropped,
         low=low_size,

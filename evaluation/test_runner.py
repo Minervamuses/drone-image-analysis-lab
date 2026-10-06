@@ -159,6 +159,32 @@ class RunBatchTests(unittest.TestCase):
         self.assertGreater(result.sr.psnr, 0)
 
 
+class LegacyNamingTests(unittest.TestCase):
+    def test_colliding_sources_and_partial_outputs_keep_four_folders_and_report_aligned(self):
+        from report import _per_image_table
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs = root / "inputs"
+            inputs.mkdir()
+            sources = [_write_source(inputs, name) for name in ("a.jpg", "a.png")]
+            run = allocate_run_directory(root / "runs")
+            previous = run / "sr" / "a.png"
+            previous.write_bytes(b"partial prior output")
+            results, failures = run_batch(sources, run, _BicubicStubLine(), lambda a, b: 0.0)
+            self.assertEqual(failures, [])
+            self.assertEqual([item.source_name for item in results], ["a.jpg", "a.png"])
+            self.assertEqual([item.output_name for item in results], ["a(2).png", "a(3).png"])
+            for kind in ("hr", "lr", "bicubic", "sr"):
+                for result in results:
+                    self.assertTrue((run / kind / result.output_name).is_file())
+            table = "\n".join(_per_image_table(results))
+            self.assertIn("| a.jpg |", table)
+            self.assertIn("| a(2).png |", table)
+            self.assertIn("| a(3).png |", table)
+            self.assertEqual(previous.read_bytes(), b"partial prior output")
+
+
 class DeviceMemoryTests(unittest.TestCase):
     def test_the_cache_is_emptied_when_a_gpu_is_present(self):
         with patch("torch.cuda.is_available", return_value=True), patch("torch.cuda.empty_cache") as empty:
@@ -263,13 +289,14 @@ class OrderedBatchTests(unittest.TestCase):
         for path, contents in before.items():
             self.assertEqual(path.read_bytes(), contents)
 
-    def test_all_same_stem_images_fail_and_other_image_runs(self):
+    def test_same_stem_images_are_numbered_and_all_outputs_are_recorded(self):
         sources = [_write_source(self.inputs, name, 7, 5) for name in ("same.png", "same.jpg", "ok.png")]
         with patch("runner.load_model", side_effect=lambda path, *, role: _OrderedDescriptor(role)):
             result = run_ordered_batch(sources, self.run_dir, ["deblur"], self.checkpoints, {})
-        self.assertEqual([row["status"] for row in result["rows"]], ["failed", "failed", "success"])
-        self.assertEqual([row["failure_stage"] for row in result["rows"][:2]], ["output", "output"])
-        self.assertFalse((self.run_dir / result["id"] / "same.png").exists())
+        self.assertEqual([row["status"] for row in result["rows"]], ["success"] * 3)
+        self.assertEqual([Path(row["output"]).name for row in result["rows"]],
+                         ["same.png", "same(2).png", "ok.png"])
+        self.assertTrue(all(Path(row["output"]).is_file() for row in result["rows"]))
 
     def test_id_uses_checkpoint_path_and_content_and_directory_is_never_reused(self):
         source = _write_source(self.inputs, "a.png", 7, 5)

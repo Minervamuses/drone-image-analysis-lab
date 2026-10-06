@@ -1,7 +1,6 @@
 """Process a folder through selected, ordered Spandrel stages."""
 
 import argparse
-from collections import Counter
 from pathlib import Path
 
 
@@ -43,14 +42,16 @@ def main() -> int:
         print(f"No supported images found in {input_directory}/")
         return 0
 
-    destinations = [output_directory / f"{source.stem}.png" for source in images]
-    counts = Counter(destination.name for destination in destinations)
-    errors = {}
+    from .image_io import read_image, unique_output_path, write_png
+    from .inference import load_model, run_stages
+
+    reserved = set()
+    destinations, errors = [], {}
     # Check all inputs before any output can replace a path or file alias.
-    for source, destination in zip(images, destinations):
+    for source in images:
+        destination = output_directory / f"{source.stem}.png"
         try:
-            if counts[destination.name] > 1:
-                raise ValueError(f"Multiple input files map to output: {destination.name}")
+            destination = unique_output_path(destination, reserved)
             if any(
                 destination.resolve() == original.resolve()
                 or (destination.exists() and destination.samefile(original))
@@ -59,6 +60,7 @@ def main() -> int:
                 raise ValueError(f"Refusing to overwrite input image through output: {destination}")
         except (OSError, RuntimeError, ValueError) as error:
             errors[source] = str(error)
+        destinations.append(destination)
 
     for source, destination in zip(images, destinations):
         for role in args.stages:
@@ -70,9 +72,6 @@ def main() -> int:
                     errors[source] = f"Refusing to overwrite checkpoint: {checkpoint}"
             except (OSError, RuntimeError) as error:
                 errors[source] = str(error)
-
-    from .image_io import read_image, write_png
-    from .inference import load_model, run_stages
 
     try:
         stages = [(role, load_model(getattr(args, f"{role}_model"), role=role)) for role in args.stages]
@@ -102,7 +101,7 @@ def main() -> int:
             print(f"[{index}/{len(images)}] {source.name} — Failed: {error}")
             failed += 1
         else:
-            print(f"[{index}/{len(images)}] {source.name}")
+            print(f"[{index}/{len(images)}] {source.name} -> {destination.name}")
             processed += 1
         finally:
             # Release the previous image before starting the next GPU forward.

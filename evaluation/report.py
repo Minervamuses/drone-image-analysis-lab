@@ -136,8 +136,8 @@ def _per_image_table(results) -> list[str]:
         "| 檔名 | 原始尺寸 | 真值（裁切後） | LR 尺寸 "
         "| SR PSNR | bicubic PSNR | PSNR 勝方 "
         "| SR SSIM | bicubic SSIM | SSIM 勝方 "
-        "| SR LPIPS | bicubic LPIPS | LPIPS 勝方 |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "| SR LPIPS | bicubic LPIPS | LPIPS 勝方 | 輸出檔名（hr/lr/bicubic/sr） |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for item in results:
         cells = [_cell(item.source_name), _size(item.original), _size(item.cropped), _size(item.low)]
@@ -146,6 +146,7 @@ def _per_image_table(results) -> list[str]:
             bicubic_value = getattr(item.bicubic, name.lower())
             winner, _ = decide_winner(name, sr_value, bicubic_value)
             cells += [_number(sr_value, _DIGITS[name]), _number(bicubic_value, _DIGITS[name]), winner]
+        cells.append(_cell(item.output_name or f"{Path(item.source_name).stem}.png"))
         lines.append("| " + " | ".join(cells) + " |")
     return lines
 

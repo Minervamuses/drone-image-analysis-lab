@@ -9,7 +9,7 @@ from unittest.mock import patch
 import torch
 from PIL import Image, ImageOps
 
-from drone_sr.image_io import read_image, write_png
+from drone_sr.image_io import read_image, unique_output_path, write_png
 
 
 class ImageIOTests(unittest.TestCase):
@@ -250,6 +250,18 @@ class ImageIOTests(unittest.TestCase):
         write_png(tensor, self.destination, self.source)
         with Image.open(self.destination) as output:
             self.assertEqual(output.getpixel((0, 0)), (0, 128, 255))
+
+    def test_numbering_skips_files_directories_symlinks_and_reserved_names(self):
+        self.destination.parent.mkdir()
+        self.destination.write_bytes(b"existing result")
+        (self.destination.parent / "source(2).png").mkdir()
+        (self.destination.parent / "source(3).png").symlink_to(self.root / "missing.png")
+        reserved = set()
+        for name in ("source(4).png", "source(5).png"):
+            result = unique_output_path(self.destination, reserved)
+            self.assertEqual(result.name, name)
+            self.assertFalse(result.exists())
+        self.assertEqual(self.destination.read_bytes(), b"existing result")
 
     def test_nonfinite_output_does_not_replace_existing_result(self):
         Image.new("RGB", (1, 1)).save(self.source)

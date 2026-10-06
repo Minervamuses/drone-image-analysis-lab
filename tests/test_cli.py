@@ -150,7 +150,7 @@ class CLITests(unittest.TestCase):
         for name, before in originals.items():
             self.assertEqual((self.root / "input" / name).read_bytes(), before)
 
-    def test_success_overwrites_its_result_and_preserves_other_output(self):
+    def test_success_numbers_its_result_and_preserves_other_output(self):
         source = self.root / "input" / "sample.png"
         self.picture(source)
         self.picture(self.root / "output" / "sample.png", (255, 0, 0))
@@ -158,22 +158,26 @@ class CLITests(unittest.TestCase):
         unrelated.write_bytes(b"unrelated")
         code, text, _, _ = self.run_cli()
         self.assertEqual(code, 0, text)
-        with Image.open(self.root / "output" / "sample.png") as result:
+        with Image.open(self.root / "output" / "sample.png") as previous:
+            self.assertEqual(previous.getpixel((0, 0)), (255, 0, 0))
+        with Image.open(self.root / "output" / "sample(2).png") as result:
             self.assertEqual(result.getpixel((0, 0)), (12, 34, 56))
+        self.assertIn("sample.png -> sample(2).png", text)
         self.assertEqual(unrelated.read_bytes(), b"unrelated")
 
-    def test_all_same_stem_inputs_fail_and_unrelated_image_continues(self):
+    def test_same_stem_inputs_are_numbered_after_existing_results(self):
         for name in ("same.jpg", "same.png", "other.png"):
             self.picture(self.root / "input" / name)
         old = self.root / "output" / "same.png"
         before = self.picture(old, (255, 0, 0))
         code, text, loads, calls = self.run_cli()
-        self.assertNotEqual(code, 0)
-        self.assertEqual((loads, calls), (1, 1))
-        self.assertIn("Processed: 1", text)
-        self.assertIn("Failed: 2", text)
+        self.assertEqual(code, 0, text)
+        self.assertEqual((loads, calls), (1, 3))
+        self.assertIn("Processed: 3", text)
+        self.assertIn("Failed: 0", text)
         self.assertEqual(old.read_bytes(), before)
-        self.assertTrue((self.root / "output" / "other.png").is_file())
+        self.assertEqual({p.name for p in old.parent.iterdir()},
+                         {"same.png", "same(2).png", "same(3).png", "other.png"})
 
     def test_same_input_output_directory_and_symlink_alias_are_rejected(self):
         source = self.root / "input" / "sample.png"
@@ -188,7 +192,7 @@ class CLITests(unittest.TestCase):
                 self.assertEqual((loads, calls), (0, 0))
                 self.assertEqual(source.read_bytes(), before)
 
-    def test_output_alias_of_a_different_input_is_rejected(self):
+    def test_output_alias_of_a_different_input_is_preserved_and_numbered(self):
         for hardlink in (False, True):
             with self.subTest(hardlink=hardlink):
                 cwd = self.root / str(hardlink)
@@ -200,9 +204,11 @@ class CLITests(unittest.TestCase):
                 target.parent.mkdir()
                 target.hardlink_to(second) if hardlink else target.symlink_to(second)
                 code, text, _, calls = self.run_cli(cwd=cwd)
-                self.assertNotEqual(code, 0)
-                self.assertIn("Processed: 1", text)
-                self.assertIn("Failed: 1", text)
+                self.assertEqual(code, 0, text)
+                self.assertEqual(calls, 2)
+                self.assertIn("Processed: 2", text)
+                self.assertIn("Failed: 0", text)
+                self.assertTrue((target.parent / "a(2).png").is_file())
                 self.assertEqual(first.read_bytes(), first_before)
                 self.assertEqual(second.read_bytes(), second_before)
                 self.assertTrue(target.samefile(second))
@@ -373,11 +379,12 @@ class CLITests(unittest.TestCase):
                 target.hardlink_to(checkpoint) if hardlink else target.symlink_to(checkpoint)
                 code, text, _, calls = self.run_cli(
                     ["--output", str(target.parent)], model=checkpoint)
-                self.assertNotEqual(code, 0)
-                self.assertEqual(calls, 0)
+                self.assertEqual(code, 0, text)
+                self.assertEqual(calls, 1)
                 self.assertEqual(checkpoint.read_bytes(), b"preserve checkpoint")
                 self.assertTrue(target.samefile(checkpoint))
-                self.assertIn("Failed: 1", text)
+                self.assertTrue((target.parent / "sample(2).png").is_file())
+                self.assertIn("Failed: 0", text)
 
 
 if __name__ == "__main__":

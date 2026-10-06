@@ -147,9 +147,10 @@ def write_csv(path, rows, fields):
 def prepare_inputs(sources, run, sharpness):
     kernels = make_kernels()
     records = []
+    reserved = set()
     for index, source in enumerate(sources):
         condition = tuple(CONDITIONS)[index % len(CONDITIONS)]
-        destination = run / "inputs" / (source.name + ".png")
+        destination = unique_output_path(run / "inputs" / f"{source.stem}.png", reserved)
         record = dict(
             image=source.name, condition=condition,
             blur_params=json.dumps(CONDITIONS[condition], sort_keys=True),
@@ -189,7 +190,7 @@ def infer_model(checkpoint, records, run):
         print(f"FAIL {model}: {load_error}", flush=True)
     try:
         for index, record in enumerate(records):
-            destination = run / "outputs" / model / (record["image"] + ".png")
+            destination = unique_output_path(run / "outputs" / model / Path(record["input_path"]).name)
             row = dict(record, model=model, output_path=str(destination), psnr=None, ssim=None, lpips=None,
                        status="failed", error="; ".join(filter(None, (record["error"], load_error))))
             image = result = None
@@ -304,14 +305,14 @@ def main():
     if not checkpoints:
         raise SystemExit(f"error: no runnable deblur checkpoints in {MODELS} after the authorized NAFNet exclusion; "
                          "prepare the lab weights, no download attempted.")
-    global np, cv2, torch, read_image, write_png, measure_tensor, load_model, upscale, psnr, ssim, PerceptualMetric
+    global np, cv2, torch, read_image, unique_output_path, write_png, measure_tensor, load_model, upscale, psnr, ssim, PerceptualMetric
     sys.path[:0] = [str(ROOT / "src"), str(ROOT / "evaluation")]
     try:
         import numpy as np
         import cv2
         import torch
         import lpips
-        from drone_sr.image_io import read_image, write_png
+        from drone_sr.image_io import read_image, unique_output_path, write_png
         from drone_sr.inference import load_model, upscale
         from blur_metrics import measure_tensor
         from metrics import psnr, ssim
