@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One deblur experiment; use the existing lab environment and prepared weights.
+# Point 6: six speed/height groups, independent SR and original-image Deblur.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -17,10 +17,9 @@ exec "$PYTHON" -u - "$@" <<'PY'
 import argparse
 import csv
 import gc
-import json
 import math
 import os
-import random
+import shutil
 import sys
 import time
 from datetime import datetime, timezone
@@ -28,182 +27,213 @@ from pathlib import Path
 
 ROOT = Path(os.environ["DEBLUR_REPO_ROOT"])
 sys.path[:0] = [str(ROOT / "src"), str(ROOT / "evaluation")]
-from metric_defs import BLUR_METRICS as SHARPNESS_METRICS
+from metric_defs import BLUR_METRICS
 
-INPUT = ROOT / "evaluation/data/input"
-MODELS = ROOT / "models/deblur"
-RUNS = ROOT / "evaluation/runs/deblur"
-SEED = 923
-CONDITIONS = {
-    "none": {},
-    "linear": {"length_px": 8, "angle_deg": 45},
-    "trajectory": {"arc_deg": 90, "max_xy_span_px": 8},
-    "gaussian": {"sigma_px": 2, "kernel_size": 13},
-}
-SHARPNESS_FIELDS = (
-    "image", "kind", "model", "condition", "path", *SHARPNESS_METRICS,
+SOURCE = ROOT / "923海上正攝_lab_extract/from_video/第六點"
+MODELS = ROOT / "models"
+RUNS = ROOT / "evaluation/runs/point6"
+CHECKPOINT_SUFFIXES = {".pth", ".pt", ".ckpt", ".safetensors"}
+DEBLUR_NAMES = (
+    "Uformer_B_GoPro.pth",
+    "fftformer_GoPro.pth",
+    "model_deblurring.pth",
+    "motion_deblurring.pth",
+)
+FIELDS = (
+    "height_m", "speed_ms", "image", "experiment", "kind", "model",
+    "source_path", "original_path", "input_path", "reference_path", "output_path",
+    "width", "height", "psnr", "ssim", "lpips", *BLUR_METRICS,
+    *(name + "_valid" for name in BLUR_METRICS),
     "status", "invalid_metrics", "error",
-)
-REFERENCE_FIELDS = (
-    "image", "condition", "blur_params", "model", "original_path", "input_path", "output_path",
-    "psnr", "ssim", "lpips", "status", "error",
-)
-SUMMARY_FIELDS = (
-    "model", "n_expected", "n_success", "n_failed", "psnr_mean", "ssim_mean", "lpips_mean",
-    "psnr_inf_count", "status",
 )
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
         prog="bash lab/run.sh",
-        description="Assign each original-size image to one of four groups; run all non-excluded deblur checkpoints.",
+        description="Point 6: first 20 frames per height/speed, all SR then four independent Deblur models.",
         epilog=(
-            "Prepare PNG/JPG/JPEG files in evaluation/data/input/ (first level), "
-            "checkpoints in models/deblur/ (recursive), and existing project/evaluation dependencies. "
-            "NAFNet-GoPro-width64.pth is skipped due to corrupted outputs, as authorized by the user. "
-            "LPIPS requires the AlexNet cache at TORCH_HOME/hub/checkpoints/"
-            "alexnet-owt-7be5be79.pth (default TORCH_HOME: models/torch-cache). "
-            "No automatic installation, download, resizing, or CPU inference. "
-            "New outputs: evaluation/runs/deblur/<UTC time>/, with full_reference.csv, "
-            "summary.csv and raw sharpness.csv. --limit is applied after the seed=923 shuffle."
+            "Source: 923海上正攝_lab_extract/from_video/第六點/{20M,90M}/速度{5,8,15}ms. "
+            "Recursively sort relative video/frame paths; take the first N per speed folder, "
+            "not N per video. Skip 60M and still photos. "
+            "SR: every checkpoint directly in models/, RGB 4x, shared bicubic LR and cropped HR. "
+            "Deblur: Uformer, FFTformer, MPRNet and Restormer in models/deblur/, original size; "
+            "NAFNet is excluded. Existing CUDA, dependencies and LPIPS AlexNet cache are required. "
+            "No automatic downloads or CPU inference. "
+            "Each run creates evaluation/runs/point6/<UTC time>/ with copied input/, sr_hr/, "
+            "sr_lr/, output/ and one results.csv; no summaries or interpretation."
         ),
     )
-    parser.add_argument("--limit", type=int, help="Use the first N shuffled images for a short lab run")
+    parser.add_argument("--limit", type=int, default=20, help="Frames PER height/speed group (1..20; default 20)")
+    parser.add_argument("--dry-run", action="store_true", help="Check and list selected paths only; no writes, imports of ML packages or inference")
     args = parser.parse_args()
-    if args.limit is not None and args.limit < 1:
-        parser.error("--limit must be positive")
+    if not 1 <= args.limit <= 20:
+        parser.error("--limit must be between 1 and 20 per group")
     return args
 
 
-def rasterize(points):
-    # Bilinear splatting preserves the uniform trajectory's time-weighted centroid.
-    points = points - points.mean(axis=0)
-    radius = int(np.ceil(np.max(np.abs(points)))) + 1
-    kernel = np.zeros((2 * radius + 1, 2 * radius + 1), dtype=np.float64)
-    coords = points + radius
-    base = np.floor(coords).astype(int)
-    fraction = coords - base
-    for dy, dx in ((0, 0), (0, 1), (1, 0), (1, 1)):
-        weight = ((fraction[:, 0] if dx else 1 - fraction[:, 0])
-                  * (fraction[:, 1] if dy else 1 - fraction[:, 1]))
-        np.add.at(kernel, (base[:, 1] + dy, base[:, 0] + dx), weight)
-    return kernel / kernel.sum()
+def select_groups(limit):
+    groups = []
+    for height in (20, 90):
+        for speed in (5, 8, 15):
+            folder = SOURCE / f"{height}M" / f"速度{speed}ms"
+            # Lab names are zero-padded: 0145/frames/0145_0000004.png.
+            images = sorted(
+                (path for path in folder.rglob("*")
+                 if path.is_file() and path.suffix.lower() in {".png", ".jpg", ".jpeg"}),
+                key=lambda path: path.relative_to(folder).as_posix(),
+            )
+            if len(images) < limit:
+                raise ValueError(f"{folder}: need {limit} frames, found {len(images)}")
+            groups.append((height, speed, images[:limit]))
+    return groups
 
 
-def make_kernels():
-    line = CONDITIONS["linear"]
-    offsets = np.linspace(-line["length_px"] / 2, line["length_px"] / 2, 257)
-    theta = np.deg2rad(line["angle_deg"])
-    # As in the existing synthesis: angle from image up, x right and y down.
-    linear = rasterize(np.column_stack((offsets * np.sin(theta), -offsets * np.cos(theta))))
-    arc = CONDITIONS["trajectory"]
-    theta = np.linspace(0, np.deg2rad(arc["arc_deg"]), 257)
-    points = np.column_stack((np.cos(theta), np.sin(theta)))
-    points *= arc["max_xy_span_px"] / np.ptp(points, axis=0).max()
-    gaussian = CONDITIONS["gaussian"]
-    line = cv2.getGaussianKernel(gaussian["kernel_size"], gaussian["sigma_px"], cv2.CV_64F)
-    gaussian = line @ line.T
-    return {"linear": linear, "trajectory": rasterize(points), "gaussian": gaussian / gaussian.sum()}
+def select_models():
+    # The lab stores SR weights at this level; never include deblur/ or torch-cache/.
+    sr = sorted(path for path in MODELS.iterdir()
+                if path.is_file() and path.suffix.lower() in CHECKPOINT_SUFFIXES) if MODELS.is_dir() else []
+    if not sr:
+        raise ValueError(f"no SR checkpoints directly in {MODELS}")
+    deblur = [MODELS / "deblur" / name for name in DEBLUR_NAMES]
+    missing = [str(path) for path in deblur if not path.is_file()]
+    if missing:
+        raise ValueError("missing required Deblur checkpoints: " + ", ".join(missing))
+    return sr, deblur
 
 
-def blur_image(image, condition, kernels):
-    if condition == "none":
-        return image
-    value = image.squeeze(0).permute(1, 2, 0).numpy().astype(np.float64)
-    light = np.where(value <= 0.04045, value / 12.92, ((value + 0.055) / 1.055) ** 2.4)
-    # filter2D is correlation; flip the PSF for convolution, reflecting the full image boundary.
-    blurred = cv2.filter2D(light, -1, kernels[condition][::-1, ::-1], borderType=cv2.BORDER_REFLECT)
-    blurred = np.clip(blurred, 0, 1)
-    encoded = np.where(blurred <= 0.0031308, 12.92 * blurred, 1.055 * blurred ** (1 / 2.4) - 0.055)
-    return torch.from_numpy(encoded.astype(np.float32)).permute(2, 0, 1).unsqueeze(0)
+def load_runtime():
+    global torch, read_image, unique_output_path, write_png, load_model, upscale
+    global measure_tensor, failed_measurements, psnr, ssim, PerceptualMetric
+    global to_pil_image, mod_crop, downscale, save_png
+    import cv2
+    import torch
+    import lpips
+    from torchvision.transforms.functional import to_pil_image
+    from drone_sr.image_io import read_image, unique_output_path, write_png
+    from drone_sr.inference import load_model, upscale
+    from blur_metrics import measure_tensor, failed_measurements
+    from degradation import mod_crop, downscale, save_png
+    from metrics import psnr, ssim
+    from perceptual import PerceptualMetric
+
+    def no_download(*args, **kwargs):
+        raise RuntimeError("Automatic weight downloads are disabled; prepare the existing lab cache")
+
+    torch.hub.download_url_to_file = no_download
+    cache = Path(torch.hub.get_dir()) / "checkpoints/alexnet-owt-7be5be79.pth"
+    calibration = Path(lpips.__file__).resolve().parent / "weights/v0.1/alex.pth"
+    for path in (cache, calibration):
+        if not path.is_file():
+            raise ValueError(f"required existing LPIPS weights missing: {path}")
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is unavailable; CPU inference is disabled")
+    torch.ones(1, device="cuda:0").sum().item()
+    free, total = torch.cuda.mem_get_info()
+    cv2.setNumThreads(1)
+    print(f"torch: {torch.__version__}; CUDA: {torch.version.cuda}; GPU: {torch.cuda.get_device_name(0)}")
+    print(f"CUDA_VISIBLE_DEVICES: {os.environ['CUDA_VISIBLE_DEVICES']}; VRAM free/total bytes: {free}/{total}")
+    print(f"PSNR/SSIM: CPU float64; LPIPS: cuda:0; cache: {cache}")
 
 
-def sharpness_row(record, kind, model, path, image=None, error=""):
-    row = dict(image=record["image"], kind=kind, model=model, condition=record["condition"], path=str(path))
-    if image is None:
-        row.update({name: None for name in SHARPNESS_METRICS})
-        row.update(status="failed", invalid_metrics=";".join(SHARPNESS_METRICS), error=error)
-        return row
-    try:
-        measurements = measure_tensor(image)
-    except Exception as exc:
-        return sharpness_row(record, kind, model, path, error=f"sharpness: {type(exc).__name__}: {exc}")
-    invalid = [name for name in SHARPNESS_METRICS if not measurements[name]["valid"]]
-    row.update({name: measurements[name]["value"] for name in SHARPNESS_METRICS})
-    row.update(
-        status="ok" if not invalid else ("failed" if len(invalid) == len(SHARPNESS_METRICS) else "partial"),
-        invalid_metrics=";".join(invalid),
-        error="; ".join(f"{name}: {measurements[name]['status']}: {measurements[name]['reason']}" for name in invalid),
-    )
-    return row
-
-
-def write_csv(path, rows, fields):
-    with path.open("w", encoding="utf-8-sig", newline="") as stream:
-        writer = csv.DictWriter(stream, fieldnames=fields)
-        writer.writeheader()
-        writer.writerows(rows)
-
-
-def prepare_inputs(sources, run, sharpness):
-    kernels = make_kernels()
+def prepare_group(group, run):
+    height, speed, sources = group
     records = []
-    reserved = set()
-    for index, source in enumerate(sources):
-        condition = tuple(CONDITIONS)[index % len(CONDITIONS)]
-        destination = unique_output_path(run / "inputs" / f"{source.stem}.png", reserved)
-        record = dict(
-            image=source.name, condition=condition,
-            blur_params=json.dumps(CONDITIONS[condition], sort_keys=True),
-            original_path=str(source), input_path=str(destination), error="",
-        )
-        image = prepared = None
+    for source in sources:
+        relative = source.relative_to(SOURCE)
+        original = run / "input" / relative
+        record = dict(height_m=height, speed_ms=speed, image=relative.as_posix(),
+                      source_path=str(source), original_path=str(original), error="", sr_error="")
         try:
-            image = read_image(source)
-            print(f"Input {source.name}: {image.shape[-1]}x{image.shape[-2]}", flush=True)
-            sharpness.append(sharpness_row(record, "original", "", source, image))
-            prepared = blur_image(image, condition, kernels)
-            write_png(prepared, destination, source)
+            original.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, original)
         except Exception as exc:
-            record["error"] = f"preparation: {type(exc).__name__}: {exc}"
-            if image is None:
-                sharpness.append(sharpness_row(record, "original", "", source, error=record["error"]))
-            print(f"FAIL {source.name}: {record['error']}", flush=True)
+            record["error"] = f"input copy: {type(exc).__name__}: {exc}"
+        decoded = image = cropped = None
+        try:
+            if not record["error"]:
+                decoded = read_image(original)
+                image = to_pil_image(decoded.squeeze(0).mul(255).round().to(torch.uint8), mode="RGB")
+                cropped, _ = mod_crop(image)
+                if min(cropped.size) < 4:
+                    raise ValueError("image is too small for 4x bicubic downsampling")
+                hr = unique_output_path((run / "sr_hr" / relative).with_suffix(".png"))
+                lr = run / "sr_lr" / relative.parent / hr.name
+                save_png(cropped, hr)
+                save_png(downscale(cropped), lr)
+                record.update(hr_path=str(hr), lr_path=str(lr))
+        except Exception as exc:
+            # An SR preparation error does not prevent independent Deblur of the copied original.
+            record["sr_error"] = f"SR preparation: {type(exc).__name__}: {exc}"
         finally:
-            del image, prepared
+            del decoded, image, cropped
         records.append(record)
-        write_csv(run / "sharpness.csv", sharpness, SHARPNESS_FIELDS)
-        print(f"Prepared {index + 1}/{len(sources)}: {source.name} -> {condition}", flush=True)
     return records
 
 
-def infer_model(checkpoint, records, run):
-    model = checkpoint.relative_to(MODELS).as_posix()
+def result_row(record, experiment, kind, model=""):
+    row = {name: record[name] for name in ("height_m", "speed_ms", "image", "source_path", "original_path")}
+    row.update(experiment=experiment, kind=kind, model=model, status="failed", error="",
+               input_path=record.get("lr_path", "") if experiment == "sr" else record["original_path"],
+               reference_path=record.get("hr_path", "") if experiment == "sr" else "",
+               output_path="")
+    return row
+
+
+def measure_sharpness(row):
+    image = None
+    try:
+        image = read_image(Path(row["output_path"] or row["input_path"]))
+        row.update(width=image.shape[-1], height=image.shape[-2])
+        measurements = measure_tensor(image)
+    except Exception as exc:
+        measurements = failed_measurements(f"{type(exc).__name__}: {exc}")
+    finally:
+        del image
+    invalid = [name for name in BLUR_METRICS if not measurements[name]["valid"]]
+    for name in BLUR_METRICS:
+        row[name] = measurements[name]["value"]
+        row[name + "_valid"] = int(measurements[name]["valid"])
+    row.update(
+        status="failed" if any(value["status"] == "failed" for value in measurements.values())
+        else ("partial" if invalid else "ok"),
+        invalid_metrics=";".join(invalid),
+        error="; ".join(f"{name}: {measurements[name]['status']}: {measurements[name]['reason']}" for name in invalid),
+    )
+
+
+def infer_model(role, checkpoint, records, run):
+    model = checkpoint.relative_to(ROOT).as_posix()
     descriptor, load_error = None, ""
     rows = []
     try:
-        descriptor = load_model(checkpoint, role="deblur")
+        descriptor = load_model(checkpoint, role=role)
+        expected_scale = 4 if role == "sr" else 1
+        if descriptor.scale != expected_scale:
+            raise ValueError(f"{role} requires scale={expected_scale}, got {descriptor.scale}")
         if descriptor.device.type != "cuda":
-            raise RuntimeError("deblur must run on CUDA; CPU fallback is disabled")
-        print(f"Model: {model}; architecture: {descriptor.architecture.name}; device: {descriptor.device}", flush=True)
+            raise RuntimeError("CUDA inference is required; CPU fallback is disabled")
+        print(f"Model: {model}; architecture: {descriptor.architecture.name}; device: {descriptor.device}")
     except Exception as exc:
         load_error = f"model load: {type(exc).__name__}: {exc}"
-        print(f"FAIL {model}: {load_error}", flush=True)
     try:
-        for index, record in enumerate(records):
-            destination = unique_output_path(run / "outputs" / model / Path(record["input_path"]).name)
-            row = dict(record, model=model, output_path=str(destination), psnr=None, ssim=None, lpips=None,
-                       status="failed", error="; ".join(filter(None, (record["error"], load_error))))
+        for index, record in enumerate(records, 1):
+            row = result_row(record, role, "model_output", model)
+            row["error"] = "; ".join(filter(None, (
+                record["error"], record["sr_error"] if role == "sr" else "", load_error,
+            )))
+            destination = unique_output_path((run / "output" / role / checkpoint.name / record["image"]).with_suffix(".png"))
+            row["output_path"] = str(destination)
             image = result = None
             try:
                 if not row["error"]:
-                    image = read_image(Path(record["input_path"]))
+                    image = read_image(Path(row["input_path"]))
                     result = upscale(image, descriptor)
-                    if result.shape != image.shape:
-                        raise ValueError(f"Expected original-size {tuple(image.shape)}, got {tuple(result.shape)}")
-                    write_png(result, destination, Path(record["input_path"]))
-                    row["status"] = "saved"
+                    expected = (*image.shape[:-2], image.shape[-2] * expected_scale, image.shape[-1] * expected_scale)
+                    if tuple(result.shape) != expected:
+                        raise ValueError(f"Expected {expected}, got {tuple(result.shape)}")
+                    write_png(result, destination, Path(row["input_path"]))
+                    row.update(status="saved", width=result.shape[-1], height=result.shape[-2])
             except Exception as exc:
                 row["error"] = f"inference/save: {type(exc).__name__}: {exc}"
             finally:
@@ -211,47 +241,38 @@ def infer_model(checkpoint, records, run):
                 if row["status"] == "failed":
                     torch.cuda.empty_cache()
             rows.append(row)
-            print(f"Inference {model} {index + 1}/{len(records)}: {row['status']} {row['error']}", flush=True)
+            print(f"{role} {checkpoint.name} {index}/{len(records)}: {row['status']} {row['error']}", flush=True)
     finally:
-        # LPIPS is loaded only after the restoration model and its tensors are gone.
+        # Restoration weights are released before loading LPIPS for this batch.
         del descriptor
         gc.collect()
         torch.cuda.empty_cache()
     return rows
 
 
-def score_outputs(rows, sharpness):
+def score_sr(rows, emit):
     perceptual, lpips_error = None, ""
     if any(row["status"] == "saved" for row in rows):
         try:
             perceptual = PerceptualMetric(device="cuda:0")
         except Exception as exc:
             lpips_error = f"LPIPS load: {type(exc).__name__}: {exc}"
-            gc.collect()
-            torch.cuda.empty_cache()
-            print(f"FAIL {lpips_error}", flush=True)
     try:
         for row in rows:
             if row["status"] != "saved":
-                sharpness.append(sharpness_row(row, "model_output", row["model"], row["output_path"], error=row["error"]))
+                emit(row)
                 continue
-            original = restored = None
-            sharpness_written = False
+            truth = restored = None
             errors = []
             try:
-                # Measure the delivered PNG; GT is always the EXIF/MPO-decoded original.
-                restored = read_image(Path(row["output_path"]))
-                sharpness.append(sharpness_row(row, "model_output", row["model"], row["output_path"], restored))
-                sharpness_written = True
-                original = read_image(Path(row["original_path"]))
-                # Match metrics.py's integer RGB levels [0,255], without float32 decode roundoff.
-                original.mul_(255).round_()
-                restored.mul_(255).round_()
+                # Score the saved PNG against the shared cropped HR, in integer RGB levels.
+                truth = read_image(Path(row["reference_path"])).mul_(255).round_()
+                restored = read_image(Path(row["output_path"])).mul_(255).round_()
                 for name, metric in (("psnr", psnr), ("ssim", ssim), ("lpips", perceptual)):
                     try:
                         if metric is None:
                             raise RuntimeError(lpips_error)
-                        value = float(metric(original, restored))
+                        value = float(metric(truth, restored))
                         if not math.isfinite(value) and not (name == "psnr" and value == math.inf):
                             raise ValueError("non-finite metric result")
                         row[name] = value
@@ -260,116 +281,83 @@ def score_outputs(rows, sharpness):
             except Exception as exc:
                 errors.append(f"metric input: {type(exc).__name__}: {exc}")
             finally:
-                del original, restored
+                del truth, restored
                 if errors:
                     torch.cuda.empty_cache()
             row.update(status="failed" if errors else "ok", error="; ".join(errors))
-            if not sharpness_written:
-                sharpness.append(sharpness_row(row, "model_output", row["model"], row["output_path"], error=row["error"]))
-            print(f"Metrics {row['model']} {row['image']}: {row['status']} {row['error']}", flush=True)
+            emit(row)
     finally:
         del perceptual
         gc.collect()
         torch.cuda.empty_cache()
 
 
-def summarize(model, rows):
-    successful = [row for row in rows if row["status"] == "ok"]
-    count = len(successful)
-    summary = dict(model=model, n_expected=len(rows), n_success=count, n_failed=len(rows) - count,
-                   psnr_inf_count=sum(row["psnr"] == math.inf for row in successful),
-                   status="partial" if count < len(rows) else "ok")
-    for name in ("psnr", "ssim", "lpips"):
-        summary[name + "_mean"] = sum(row[name] for row in successful) / count if count else None
-    return summary
+def run_experiment(groups, sr_models, deblur_models, run):
+    failures = 0
+    with (run / "results.csv").open("x", encoding="utf-8-sig", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=FIELDS)
+        writer.writeheader()
+        stream.flush()
+
+        def emit(row):
+            nonlocal failures
+            writer.writerow(row)
+            stream.flush()
+            failures += row["status"] == "failed"
+            if row["status"] != "ok":
+                print(f"Metrics {row['experiment']} {row['model']} {row['image']}: {row['status']} {row['error']}", flush=True)
+
+        for group in groups:
+            print(f"Group: {group[0]}M / {group[1]}ms; frames: {len(group[2])}", flush=True)
+            records = prepare_group(group, run)
+            for checkpoint in sr_models:
+                score_sr(infer_model("sr", checkpoint, records, run), emit)
+            # Baseline is measured once per original; never use SR or synthesized blur as input.
+            for record in records:
+                row = result_row(record, "deblur", "original")
+                if record["error"]:
+                    row.update(error=record["error"], invalid_metrics=";".join(BLUR_METRICS))
+                else:
+                    measure_sharpness(row)
+                emit(row)
+            for checkpoint in deblur_models:
+                for row in infer_model("deblur", checkpoint, records, run):
+                    if row["status"] == "saved":
+                        measure_sharpness(row)
+                    else:
+                        row["invalid_metrics"] = ";".join(BLUR_METRICS)
+                    emit(row)
+    return 1 if failures else 0
 
 
 def main():
-    args = parse_args()  # --help exits before importing ML packages or requiring data/weights.
+    args = parse_args()
+    try:
+        groups = select_groups(args.limit)
+        sr_models, deblur_models = select_models()
+    except (OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print(f"Source: {SOURCE}; SR: {len(sr_models)}; Deblur: {len(deblur_models)}")
+    for height, speed, sources in groups:
+        print(f"{height}M/{speed}ms: {len(sources)} frames; {sources[0].relative_to(SOURCE)} .. {sources[-1].relative_to(SOURCE)}")
+    for role, checkpoints in (("sr", sr_models), ("deblur", deblur_models)):
+        for checkpoint in checkpoints:
+            print(f"{role}: {checkpoint.relative_to(ROOT)}")
+    if args.dry_run:
+        return 0
+    try:
+        load_runtime()
+    except Exception as exc:
+        print(f"error: runtime preflight: {type(exc).__name__}: {exc}; no installation/download attempted", file=sys.stderr)
+        return 2
     started = time.perf_counter()
-    sources = sorted(path for path in INPUT.iterdir()
-                     if path.is_file() and path.suffix.lower() in {".png", ".jpg", ".jpeg"}) if INPUT.is_dir() else []
-    random.Random(SEED).shuffle(sources)
-    if args.limit is not None:
-        sources = sources[:args.limit]
-    checkpoints = sorted((path for path in MODELS.rglob("*")
-                          if path.is_file() and path.suffix.lower() in {".pth", ".pt", ".ckpt", ".safetensors"}),
-                         key=lambda path: path.relative_to(MODELS).as_posix())
-    # The user authorized skipping this checkpoint after visible color/checkerboard artifacts.
-    excluded_checkpoint = "NAFNet-GoPro-width64.pth"
-    for checkpoint in checkpoints:
-        if checkpoint.name == excluded_checkpoint:
-            print(f"SKIP {checkpoint.relative_to(MODELS).as_posix()}: known corrupted output; "
-                  "user authorized skipping NAFNet on 2026-10-04", flush=True)
-    checkpoints = [path for path in checkpoints if path.name != excluded_checkpoint]
-    if not sources:
-        raise SystemExit(f"error: no PNG/JPG/JPEG inputs in {INPUT}; prepare the lab data, no download attempted.")
-    if not checkpoints:
-        raise SystemExit(f"error: no runnable deblur checkpoints in {MODELS} after the authorized NAFNet exclusion; "
-                         "prepare the lab weights, no download attempted.")
-    global np, cv2, torch, read_image, unique_output_path, write_png, measure_tensor, load_model, upscale, psnr, ssim, PerceptualMetric
-    try:
-        import numpy as np
-        import cv2
-        import torch
-        import lpips
-        from drone_sr.image_io import read_image, unique_output_path, write_png
-        from drone_sr.inference import load_model, upscale
-        from blur_metrics import measure_tensor
-        from metrics import psnr, ssim
-        from perceptual import PerceptualMetric
-    except Exception as exc:
-        raise SystemExit(f"error: existing lab dependencies are unavailable: {type(exc).__name__}: {exc}; no installation attempted.") from exc
-
-    def no_download(*args, **kwargs):
-        raise RuntimeError("Automatic weight downloads are disabled; prepare the existing lab cache manually")
-
-    torch.hub.download_url_to_file = no_download
-    cache = Path(torch.hub.get_dir()) / "checkpoints/alexnet-owt-7be5be79.pth"
-    calibration = Path(lpips.__file__).resolve().parent / "weights/v0.1/alex.pth"
-    for path in (cache, calibration):
-        if not path.is_file():
-            raise SystemExit(f"error: required existing LPIPS weights missing: {path}; no download attempted.")
-    if not torch.cuda.is_available():
-        raise SystemExit("error: CUDA is unavailable; fix lab GPU access. CPU fallback is disabled.")
-    try:
-        torch.ones(1, device="cuda:0").sum().item()
-        free, total = torch.cuda.mem_get_info()
-    except Exception as exc:
-        raise SystemExit(f"error: lab CUDA preflight failed: {type(exc).__name__}: {exc}") from exc
-    print(f"torch: {torch.__version__}; CUDA runtime: {torch.version.cuda}; GPU: {torch.cuda.get_device_name(0)}", flush=True)
-    print(f"CUDA_VISIBLE_DEVICES: {os.environ['CUDA_VISIBLE_DEVICES']}; free/total VRAM bytes: {free}/{total}", flush=True)
-    print(f"PSNR/SSIM: CPU float64; LPIPS: cuda:0; cache: {cache}", flush=True)
-    print(Path("/proc/meminfo").read_text().splitlines()[:3], flush=True)
-    for name in ("memory.max", "memory.current"):
-        path = Path("/sys/fs/cgroup") / name
-        if path.is_file():
-            print(f"cgroup {name}: {path.read_text().strip()}", flush=True)
-    cv2.setNumThreads(1)
     run = RUNS / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     run.mkdir(parents=True, exist_ok=False)
-    print(f"Run: {run}; images: {len(sources)}; checkpoints: {len(checkpoints)}; seed: {SEED}", flush=True)
-    sharpness, reference, summaries = [], [], []
-    write_csv(run / "full_reference.csv", reference, REFERENCE_FIELDS)
-    write_csv(run / "summary.csv", summaries, SUMMARY_FIELDS)
-    write_csv(run / "sharpness.csv", sharpness, SHARPNESS_FIELDS)
-    records = prepare_inputs(sources, run, sharpness)
-    print(f"Prepared {sum(not record['error'] for record in records)}/{len(records)} model inputs.", flush=True)
-    for checkpoint in checkpoints:
-        model_started = time.perf_counter()
-        rows = infer_model(checkpoint, records, run)
-        reference.extend(rows)
-        write_csv(run / "full_reference.csv", reference, REFERENCE_FIELDS)
-        score_outputs(rows, sharpness)
-        summary = summarize(checkpoint.relative_to(MODELS).as_posix(), rows)
-        summaries.append(summary)
-        write_csv(run / "full_reference.csv", reference, REFERENCE_FIELDS)
-        write_csv(run / "summary.csv", summaries, SUMMARY_FIELDS)
-        write_csv(run / "sharpness.csv", sharpness, SHARPNESS_FIELDS)
-        print(f"Summary {summary['model']}: {summary['n_success']}/{summary['n_expected']} complete scores; "
-              f"{summary['status']}; {time.perf_counter() - model_started:.1f}s", flush=True)
-    print(f"Finished: {run}; total elapsed: {time.perf_counter() - started:.1f}s", flush=True)
-    return 1 if any(summary["n_failed"] for summary in summaries) else 0
+    print(f"Run: {run}; input: {run / 'input'}; output: {run / 'output'}", flush=True)
+    status = run_experiment(groups, sr_models, deblur_models, run)
+    print(f"Results: {run / 'results.csv'}; exit status: {status}; elapsed: {time.perf_counter() - started:.1f}s", flush=True)
+    return status
 
 
 if __name__ == "__main__":

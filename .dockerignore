@@ -1,0 +1,15 @@
+*
+!Dockerfile
+!.dockerignore
+!pyproject.toml
+!requirements-wsl.txt
+!src/
+!src/**
+!evaluation/
+!evaluation/*.py
+!evaluation/requirements.txt
+!evaluation/LICENSE-CPBD.txt
+!lab/
+!lab/run.sh
+**/__pycache__/
+**/*.pyc
