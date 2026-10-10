@@ -51,7 +51,7 @@ FIELDS = (
 def parse_args():
     parser = argparse.ArgumentParser(
         prog="bash lab/run.sh",
-        description="Point 6: first 20 frames per height/speed, all SR then four independent Deblur models.",
+        description="Point 6: first 18 frames per height/speed, all SR then four independent Deblur models.",
         epilog=(
             "Source: 923海上正攝_lab_extract/from_video/第六點/{20M,90M}/速度{5,8,15}ms. "
             "Recursively sort relative video/frame paths; take the first N per speed folder, "
@@ -64,11 +64,11 @@ def parse_args():
             "sr_lr/, output/ and one results.csv; no summaries or interpretation."
         ),
     )
-    parser.add_argument("--limit", type=int, default=20, help="Frames PER height/speed group (1..20; default 20)")
+    parser.add_argument("--limit", type=int, default=18, help="Frames PER height/speed group (1..18; default 18)")
     parser.add_argument("--dry-run", action="store_true", help="Check and list selected paths only; no writes, imports of ML packages or inference")
     args = parser.parse_args()
-    if not 1 <= args.limit <= 20:
-        parser.error("--limit must be between 1 and 20 per group")
+    if not 1 <= args.limit <= 18:
+        parser.error("--limit must be between 1 and 18 per group")
     return args
 
 

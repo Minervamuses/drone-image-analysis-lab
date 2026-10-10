@@ -29,4 +29,5 @@ RUN .venv/bin/python -m pip install --no-deps --no-build-isolation -e . \
 # Mount /app/evaluation/runs writable to retain images and results.csv.
 # GPU execution requires a host with NVIDIA Container Toolkit and --gpus.
 # --dry-run checks mounted inputs/weights without requiring GPU access.
+# Default: 18 frames per height/speed group, 108 originals across six groups.
 ENTRYPOINT ["/bin/bash", "lab/run.sh"]
